@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+
+{% block title %}Subject Detail - Age-Normed MRIQC{% endblock %}
+
+{% block content %}
+<div class="row">
+    <!-- Subject Information -->
+    <div class="col-md-4 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-person"></i>
+                    Subject Information
+                </h5>
+            </div>
+            <div class="card-body">
+                <div id="subject-info">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-2">Loading subject information...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Quality Assessment -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-shield-check"></i>
+                    Quality Assessment
+                </h5>
+            </div>
+            <div class="card-body">
+                <div id="quality-assessment">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-2">Loading quality assessment...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Recommendations -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-lightbulb"></i>
+                    Recommendations
+                </h5>
+            </div>
+            <div class="card-body">
+                <div id="recommendations">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-2">Loading recommendations...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Metrics and Visualizations -->
+    <div class="col-md-8">
+        <!-- Raw Metrics -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-graph-up"></i>
+                        Quality Metrics
+                    </h5>
+                    <div class="btn-group btn-group-sm" role="group">
+                        <input type="radio" class="btn-check" name="metric-view" id="raw-view" autocomplete="off" checked>
+                        <label class="btn btn-outline-primary" for="raw-view">Raw Values</label>
+                        
+                        <input type="radio" class="btn-check" name="metric-view" id="normalized-view" autocomplete="off">
+                        <label class="btn btn-outline-primary" for="normalized-view">Normalized</label>
+                        
+                        <input type="radio" class="btn-check" name="metric-view" id="percentile-view" autocomplete="off">
+                        <label class="btn btn-outline-primary" for="percentile-view">Percentiles</label>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="metrics-content">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-2">Loading metrics...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Metric Visualization -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-bar-chart"></i>
+                        Metric Comparison
+                    </h5>
+                    <div>
+                        <select class="form-select form-select-sm" id="comparison-type">
+                            <option value="age_group">Compare to Age Group</option>
+                            <option value="all_subjects">Compare to All Subjects</option>
+                            <option value="scan_type">Compare to Scan Type</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body">
+                <canvas id="metric-comparison-chart" width="600" height="400"></canvas>
+            </div>
+        </div>
+        
+        <!-- Age-Specific Percentiles -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-percent"></i>
+                    Age-Specific Percentiles
+                </h5>
+            </div>
+            <div class="card-body">
+                <canvas id="percentile-chart" width="600" height="300"></canvas>
+            </div>
+        </div>
+        
+        <!-- Quality Flags and Issues -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-flag"></i>
+                    Quality Flags & Issues
+                </h5>
+            </div>
+            <div class="card-body">
+                <div id="quality-flags">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-2">Loading quality flags...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Action Buttons -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="d-flex justify-content-between">
+            <div>
+                <a href="/subjects" class="btn btn-outline-secondary">
+                    <i class="bi bi-arrow-left"></i>
+                    Back to Subjects
+                </a>
+            </div>
+            
+            <div>
+                <button class="btn btn-outline-primary" onclick="exportSubjectReport()">
+                    <i class="bi bi-file-earmark-pdf"></i>
+                    Export Report
+                </button>
+                <button class="btn btn-outline-success" onclick="exportSubjectData()">
+                    <i class="bi bi-file-earmark-spreadsheet"></i>
+                    Export Data
+                </button>
+                <div class="btn-group">
+                    <button class="btn btn-primary dropdown-toggle" data-bs-toggle="dropdown">
+                        <i class="bi bi-pencil"></i>
+                        Update Quality
+                    </button>
+                    <ul class="dropdown-menu">
+                        <li><a class="dropdown-item" href="#" onclick="updateQualityStatus('pass')">
+                            <i class="bi bi-check-circle text-success"></i> Mark as Pass
+                        </a></li>
+                        <li><a class="dropdown-item" href="#" onclick="updateQualityStatus('warning')">
+                            <i class="bi bi-exclamation-triangle text-warning"></i> Mark as Warning
+                        </a></li>
+                        <li><a class="dropdown-item" href="#" onclick="updateQualityStatus('fail')">
+                            <i class="bi bi-x-circle text-danger"></i> Mark as Fail
+                        </a></li>
+                        <li><a class="dropdown-item" href="#" onclick="updateQualityStatus('uncertain')">
+                            <i class="bi bi-question-circle text-secondary"></i> Mark as Uncertain
+                        </a></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quality Update Modal -->
+<div class="modal fade" id="quality-update-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Update Quality Status</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Update quality status for subject <strong id="update-subject-id"></strong>:</p>
+                <div class="mb-3">
+                    <label for="new-quality-status" class="form-label">New Quality Status</label>
+                    <select class="form-select" id="new-quality-status">
+                        <option value="pass">Pass</option>
+                        <option value="warning">Warning</option>
+                        <option value="fail">Fail</option>
+                        <option value="uncertain">Uncertain</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label for="update-reason" class="form-label">Reason</label>
+                    <textarea class="form-control" id="update-reason" rows="3" placeholder="Reason for quality status change..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="confirmQualityUpdate()">Update Status</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/subject-detail.js"></script>
+{% endblock %}

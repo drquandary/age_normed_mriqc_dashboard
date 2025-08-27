@@ -1,0 +1,364 @@
+{% extends "base.html" %}
+
+{% block title %}Subjects - Age-Normed MRIQC{% endblock %}
+
+{% block content %}
+<div class="row">
+    <!-- Filters and Search -->
+    <div class="col-12 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-funnel"></i>
+                        Filters & Search
+                    </h5>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="toggleFilters()">
+                        <i class="bi bi-chevron-down" id="filter-toggle-icon"></i>
+                        <span id="filter-toggle-text">Show Filters</span>
+                    </button>
+                </div>
+            </div>
+            <div class="card-body d-none" id="filter-panel">
+                <div class="row">
+                    <!-- Search -->
+                    <div class="col-md-4 mb-3">
+                        <label for="search-input" class="form-label">Search</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="search-input" placeholder="Subject ID, session...">
+                            <button class="btn btn-outline-secondary" type="button" onclick="clearSearch()">
+                                <i class="bi bi-x"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Quality Status Filter -->
+                    <div class="col-md-2 mb-3">
+                        <label for="quality-filter" class="form-label">Quality Status</label>
+                        <select class="form-select" id="quality-filter">
+                            <option value="">All</option>
+                            <option value="pass">Pass</option>
+                            <option value="warning">Warning</option>
+                            <option value="fail">Fail</option>
+                            <option value="uncertain">Uncertain</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Age Group Filter -->
+                    <div class="col-md-2 mb-3">
+                        <label for="age-group-filter" class="form-label">Age Group</label>
+                        <select class="form-select" id="age-group-filter">
+                            <option value="">All</option>
+                            <option value="pediatric">Pediatric (6-12)</option>
+                            <option value="adolescent">Adolescent (13-17)</option>
+                            <option value="young_adult">Young Adult (18-35)</option>
+                            <option value="middle_age">Middle Age (36-65)</option>
+                            <option value="elderly">Elderly (65+)</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Scan Type Filter -->
+                    <div class="col-md-2 mb-3">
+                        <label for="scan-type-filter" class="form-label">Scan Type</label>
+                        <select class="form-select" id="scan-type-filter">
+                            <option value="">All</option>
+                            <option value="T1w">T1w</option>
+                            <option value="T2w">T2w</option>
+                            <option value="BOLD">BOLD</option>
+                            <option value="DWI">DWI</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Age Range -->
+                    <div class="col-md-2 mb-3">
+                        <label class="form-label">Age Range</label>
+                        <div class="d-flex">
+                            <input type="number" class="form-control form-control-sm" id="age-min" placeholder="Min" min="0" max="120">
+                            <span class="mx-1 align-self-center">-</span>
+                            <input type="number" class="form-control form-control-sm" id="age-max" placeholder="Max" min="0" max="120">
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Advanced Filters -->
+                <div class="row">
+                    <div class="col-12">
+                        <button class="btn btn-outline-primary btn-sm" onclick="toggleAdvancedFilters()">
+                            <i class="bi bi-sliders"></i>
+                            Advanced Filters
+                        </button>
+                    </div>
+                </div>
+                
+                <div id="advanced-filters" class="mt-3 d-none">
+                    <div class="row">
+                        <!-- Metric Filters -->
+                        <div class="col-md-6">
+                            <h6>Metric Filters</h6>
+                            <div class="row">
+                                <div class="col-6">
+                                    <label class="form-label">SNR Range</label>
+                                    <div class="d-flex">
+                                        <input type="number" class="form-control form-control-sm" id="snr-min" placeholder="Min">
+                                        <span class="mx-1 align-self-center">-</span>
+                                        <input type="number" class="form-control form-control-sm" id="snr-max" placeholder="Max">
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label">CNR Range</label>
+                                    <div class="d-flex">
+                                        <input type="number" class="form-control form-control-sm" id="cnr-min" placeholder="Min">
+                                        <span class="mx-1 align-self-center">-</span>
+                                        <input type="number" class="form-control form-control-sm" id="cnr-max" placeholder="Max">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Date Range -->
+                        <div class="col-md-6">
+                            <h6>Processing Date Range</h6>
+                            <div class="row">
+                                <div class="col-6">
+                                    <label class="form-label">From</label>
+                                    <input type="date" class="form-control form-control-sm" id="date-from">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label">To</label>
+                                    <input type="date" class="form-control form-control-sm" id="date-to">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Filter Actions -->
+                <div class="row mt-3">
+                    <div class="col-12">
+                        <button class="btn btn-primary" onclick="applyFilters()">
+                            <i class="bi bi-search"></i>
+                            Apply Filters
+                        </button>
+                        <button class="btn btn-outline-secondary" onclick="clearFilters()">
+                            <i class="bi bi-x-circle"></i>
+                            Clear All
+                        </button>
+                        <button class="btn btn-outline-info" onclick="saveFilterPreset()">
+                            <i class="bi bi-bookmark"></i>
+                            Save Preset
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <!-- Subject List -->
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h5 class="card-title mb-0">
+                            <i class="bi bi-people"></i>
+                            Subjects
+                            <span class="badge bg-secondary" id="subject-count">0</span>
+                        </h5>
+                        <small class="text-muted" id="filter-summary">Showing all subjects</small>
+                    </div>
+                    
+                    <div class="btn-group">
+                        <button class="btn btn-outline-primary btn-sm" onclick="refreshSubjects()">
+                            <i class="bi bi-arrow-clockwise"></i>
+                            Refresh
+                        </button>
+                        <button class="btn btn-outline-success btn-sm" onclick="exportFilteredSubjects()">
+                            <i class="bi bi-download"></i>
+                            Export
+                        </button>
+                        <div class="btn-group" role="group">
+                            <button class="btn btn-outline-secondary btn-sm dropdown-toggle" data-bs-toggle="dropdown">
+                                <i class="bi bi-three-dots"></i>
+                            </button>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" onclick="selectAllSubjects()">
+                                    <i class="bi bi-check-all"></i> Select All
+                                </a></li>
+                                <li><a class="dropdown-item" href="#" onclick="deselectAllSubjects()">
+                                    <i class="bi bi-x-square"></i> Deselect All
+                                </a></li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li><a class="dropdown-item" href="#" onclick="bulkUpdateQuality()">
+                                    <i class="bi bi-pencil-square"></i> Bulk Update Quality
+                                </a></li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0" id="subjects-table">
+                        <thead class="table-light">
+                            <tr>
+                                <th width="40">
+                                    <input type="checkbox" class="form-check-input" id="select-all-checkbox">
+                                </th>
+                                <th>
+                                    <a href="#" onclick="sortSubjects('subject_id')" class="text-decoration-none">
+                                        Subject ID
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th>
+                                    <a href="#" onclick="sortSubjects('age')" class="text-decoration-none">
+                                        Age
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th>Age Group</th>
+                                <th>Scan Type</th>
+                                <th>
+                                    <a href="#" onclick="sortSubjects('quality_status')" class="text-decoration-none">
+                                        Quality Status
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th>
+                                    <a href="#" onclick="sortSubjects('composite_score')" class="text-decoration-none">
+                                        Score
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th>Key Metrics</th>
+                                <th>
+                                    <a href="#" onclick="sortSubjects('processing_timestamp')" class="text-decoration-none">
+                                        Processed
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th width="120">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="subjects-tbody">
+                            <tr>
+                                <td colspan="10" class="text-center py-5">
+                                    <div class="spinner-border text-primary" role="status">
+                                        <span class="visually-hidden">Loading...</span>
+                                    </div>
+                                    <p class="mt-2 text-muted">Loading subjects...</p>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Pagination -->
+            <div class="card-footer">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <small class="text-muted" id="pagination-info">
+                            Showing 0 - 0 of 0 subjects
+                        </small>
+                    </div>
+                    
+                    <nav>
+                        <ul class="pagination pagination-sm mb-0" id="pagination">
+                            <li class="page-item disabled">
+                                <a class="page-link" href="#" onclick="previousPage()">
+                                    <i class="bi bi-chevron-left"></i>
+                                </a>
+                            </li>
+                            <li class="page-item active">
+                                <a class="page-link" href="#">1</a>
+                            </li>
+                            <li class="page-item disabled">
+                                <a class="page-link" href="#" onclick="nextPage()">
+                                    <i class="bi bi-chevron-right"></i>
+                                </a>
+                            </li>
+                        </ul>
+                    </nav>
+                    
+                    <div>
+                        <select class="form-select form-select-sm" id="page-size-select" onchange="changePageSize()">
+                            <option value="25">25 per page</option>
+                            <option value="50" selected>50 per page</option>
+                            <option value="100">100 per page</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Subject Detail Modal -->
+<div class="modal fade" id="subject-detail-modal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Subject Details</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="subject-detail-content">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-2">Loading subject details...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-primary" onclick="exportSubjectReport()">
+                    <i class="bi bi-download"></i>
+                    Export Report
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bulk Update Modal -->
+<div class="modal fade" id="bulk-update-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Bulk Update Quality Status</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Update quality status for <span id="selected-count">0</span> selected subjects:</p>
+                <div class="mb-3">
+                    <label for="bulk-quality-status" class="form-label">New Quality Status</label>
+                    <select class="form-select" id="bulk-quality-status">
+                        <option value="pass">Pass</option>
+                        <option value="warning">Warning</option>
+                        <option value="fail">Fail</option>
+                        <option value="uncertain">Uncertain</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label for="bulk-update-reason" class="form-label">Reason (optional)</label>
+                    <textarea class="form-control" id="bulk-update-reason" rows="3" placeholder="Reason for quality status change..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="confirmBulkUpdate()">Update Selected</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/subjects.js"></script>
+{% endblock %}
