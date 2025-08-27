@@ -18,3 +18,13 @@ jinja2
 celery[redis]
 watchdog
 kombu
+scipy  # For statistical calculations in age normalizer
+psutil  # For system performance monitoring
+# Security dependencies
+python-magic-bin  # For file type detection
+clamd  # ClamAV Python interface (optional)
+hashlib  # For file hashing (built-in)
+# Testing dependencies
+pytest-asyncio
+pytest-mock
+httpx  # For async testing

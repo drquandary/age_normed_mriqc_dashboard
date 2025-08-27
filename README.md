@@ -21,8 +21,12 @@ A sample dataset is provided in the `data` folder to help you get started with i
 
 ## Endpoints
 - GET `/` : Basic project info.
-- GET `/api/health` : Health check, returns `{ "status": "ok" }`.
-- POST `/api/process` : Process request and enrich with CSV lookup.
+- GET `/api/health` : Health check with service metadata.
+- POST `/api/upload` : Upload an MRIQC JSON or ZIP; returns file info and validation.
+- POST `/api/process` : Process a previously uploaded file and compute metrics.
+- GET `/api/dashboard/summary` : Study-wide QC summary with age-normed thresholds.
+- GET `/api/subjects` : List subjects with QC status; supports filters.
+- POST `/api/export/csv` : Export summary CSV; POST `/api/export/pdf` for a PDF report.
 
 Example:
 
@@ -32,6 +36,13 @@ curl -s http://localhost:8000/api/health
 curl -s -X POST http://localhost:8000/api/process \
   -H 'Content-Type: application/json' \
   -d '{"sample_id": 1, "value": 2.0}'
+
+# Upload MRIQC JSON
+curl -s -X POST http://localhost:8000/api/upload \
+  -F 'file=@/path/to/mriqc.json' | jq .
+
+# Dashboard summary
+curl -s http://localhost:8000/api/dashboard/summary | jq '.summary, .age_groups[0]'
 ```
 
 ## Contributor Quickstart
@@ -54,3 +65,11 @@ black . && isort . && flake8 app tests && mypy app
 # 5) Commit using Conventional Commits
 # e.g., feat: age-binned thresholds in summary API
 ```
+
+## API Quick Reference
+
+- POST `/api/upload`: Upload MRIQC JSON or ZIP.
+- POST `/api/process`: Process and compute metrics.
+- GET `/api/dashboard/summary`: Aggregate QC summary with age-normed thresholds.
+- GET `/api/subjects`: List/filter subjects and QC status.
+- POST `/api/export/csv` | `/api/export/pdf`: Export summaries.

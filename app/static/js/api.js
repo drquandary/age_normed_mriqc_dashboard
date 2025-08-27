@@ -187,10 +187,13 @@ class APIClient {
      * Advanced subject filtering
      */
     async filterSubjects(filterCriteria, sortCriteria = null, page = 1, pageSize = 50) {
-        return this.post('/subjects/filter', {
+        const data = {
             filter_criteria: filterCriteria,
-            sort_criteria: sortCriteria
-        }, { page, page_size: pageSize });
+            sort_criteria: sortCriteria,
+            page: page,
+            page_size: pageSize
+        };
+        return this.post('/subjects/filter', data);
     }
 
     /**

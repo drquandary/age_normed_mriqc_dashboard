@@ -163,42 +163,245 @@
 </div>
 
 <div class="row">
+    <!-- Advanced Filters Panel -->
+    <div class="col-12 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-funnel"></i>
+                        Advanced Dashboard Filters
+                    </h5>
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-secondary" onclick="toggleAdvancedFilters()">
+                            <i class="bi bi-sliders" id="advanced-filter-icon"></i>
+                            <span id="advanced-filter-text">Show Filters</span>
+                        </button>
+                        <button class="btn btn-outline-info" onclick="showFilterPresets()">
+                            <i class="bi bi-bookmark"></i>
+                            Presets
+                        </button>
+                        <button class="btn btn-outline-primary" onclick="showCustomizeView()">
+                            <i class="bi bi-gear"></i>
+                            Customize
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body d-none" id="advanced-filters-panel">
+                <div class="row">
+                    <!-- Quick Search -->
+                    <div class="col-md-3 mb-3">
+                        <label for="dashboard-search" class="form-label">Quick Search</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="dashboard-search" 
+                                   placeholder="Subject ID, batch...">
+                            <button class="btn btn-outline-secondary" onclick="clearDashboardSearch()">
+                                <i class="bi bi-x"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Quality Status Filter -->
+                    <div class="col-md-2 mb-3">
+                        <label for="dashboard-quality-filter" class="form-label">Quality Status</label>
+                        <select class="form-select" id="dashboard-quality-filter" multiple>
+                            <option value="pass">Pass</option>
+                            <option value="warning">Warning</option>
+                            <option value="fail">Fail</option>
+                            <option value="uncertain">Uncertain</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Age Group Filter -->
+                    <div class="col-md-2 mb-3">
+                        <label for="dashboard-age-group-filter" class="form-label">Age Groups</label>
+                        <select class="form-select" id="dashboard-age-group-filter" multiple>
+                            <option value="pediatric">Pediatric</option>
+                            <option value="adolescent">Adolescent</option>
+                            <option value="young_adult">Young Adult</option>
+                            <option value="middle_age">Middle Age</option>
+                            <option value="elderly">Elderly</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Date Range -->
+                    <div class="col-md-3 mb-3">
+                        <label class="form-label">Processing Date Range</label>
+                        <div class="d-flex gap-2">
+                            <input type="date" class="form-control" id="dashboard-date-from">
+                            <input type="date" class="form-control" id="dashboard-date-to">
+                        </div>
+                    </div>
+                    
+                    <!-- Metric Threshold -->
+                    <div class="col-md-2 mb-3">
+                        <label for="dashboard-score-threshold" class="form-label">Min Score</label>
+                        <input type="range" class="form-range" id="dashboard-score-threshold" 
+                               min="0" max="1" step="0.1" value="0">
+                        <div class="d-flex justify-content-between">
+                            <small>0</small>
+                            <small id="score-threshold-value">0</small>
+                            <small>1</small>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="row">
+                    <div class="col-12">
+                        <button class="btn btn-primary" onclick="applyDashboardFilters()">
+                            <i class="bi bi-search"></i>
+                            Apply Filters
+                        </button>
+                        <button class="btn btn-outline-secondary" onclick="clearDashboardFilters()">
+                            <i class="bi bi-x-circle"></i>
+                            Clear
+                        </button>
+                        <button class="btn btn-outline-success" onclick="saveDashboardPreset()">
+                            <i class="bi bi-bookmark-plus"></i>
+                            Save as Preset
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
     <!-- Subject List Preview -->
     <div class="col-12">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
-                <h5 class="card-title mb-0">
-                    <i class="bi bi-table"></i>
-                    Recent Subjects
-                </h5>
-                <a href="/subjects" class="btn btn-primary btn-sm">
-                    View All Subjects
-                    <i class="bi bi-arrow-right"></i>
-                </a>
+                <div>
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-table"></i>
+                        <span id="subjects-table-title">Recent Subjects</span>
+                        <span class="badge bg-secondary" id="filtered-subject-count">0</span>
+                    </h5>
+                    <small class="text-muted" id="subjects-filter-summary">Showing recent subjects</small>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-outline-primary btn-sm" onclick="refreshDashboardSubjects()">
+                        <i class="bi bi-arrow-clockwise"></i>
+                        Refresh
+                    </button>
+                    <div class="btn-group" role="group">
+                        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" data-bs-toggle="dropdown">
+                            <i class="bi bi-three-dots"></i>
+                        </button>
+                        <ul class="dropdown-menu">
+                            <li><a class="dropdown-item" href="#" onclick="selectAllDashboardSubjects()">
+                                <i class="bi bi-check-all"></i> Select All Visible
+                            </a></li>
+                            <li><a class="dropdown-item" href="#" onclick="deselectAllDashboardSubjects()">
+                                <i class="bi bi-x-square"></i> Deselect All
+                            </a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="#" onclick="bulkExportSelected()">
+                                <i class="bi bi-download"></i> Export Selected
+                            </a></li>
+                            <li><a class="dropdown-item" href="#" onclick="bulkUpdateQualityDashboard()">
+                                <i class="bi bi-pencil-square"></i> Bulk Update Quality
+                            </a></li>
+                        </ul>
+                    </div>
+                    <a href="/subjects" class="btn btn-primary btn-sm">
+                        View All Subjects
+                        <i class="bi bi-arrow-right"></i>
+                    </a>
+                </div>
             </div>
-            <div class="card-body">
+            <div class="card-body p-0">
                 <div class="table-responsive">
-                    <table class="table table-hover" id="recent-subjects-table">
-                        <thead>
+                    <table class="table table-hover mb-0" id="dashboard-subjects-table">
+                        <thead class="table-light">
                             <tr>
-                                <th>Subject ID</th>
-                                <th>Age</th>
+                                <th width="40">
+                                    <input type="checkbox" class="form-check-input" id="dashboard-select-all">
+                                </th>
+                                <th>
+                                    <a href="#" onclick="sortDashboardSubjects('subject_id')" class="text-decoration-none">
+                                        Subject ID
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th>
+                                    <a href="#" onclick="sortDashboardSubjects('age')" class="text-decoration-none">
+                                        Age
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th>Age Group</th>
                                 <th>Scan Type</th>
-                                <th>Quality Status</th>
-                                <th>Composite Score</th>
-                                <th>Processed</th>
-                                <th>Actions</th>
+                                <th>
+                                    <a href="#" onclick="sortDashboardSubjects('quality_status')" class="text-decoration-none">
+                                        Quality Status
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th>
+                                    <a href="#" onclick="sortDashboardSubjects('composite_score')" class="text-decoration-none">
+                                        Score
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th>Key Metrics</th>
+                                <th>
+                                    <a href="#" onclick="sortDashboardSubjects('processing_timestamp')" class="text-decoration-none">
+                                        Processed
+                                        <i class="bi bi-arrow-down-up text-muted"></i>
+                                    </a>
+                                </th>
+                                <th width="120">Actions</th>
                             </tr>
                         </thead>
-                        <tbody id="recent-subjects-tbody">
+                        <tbody id="dashboard-subjects-tbody">
                             <tr>
-                                <td colspan="7" class="text-center text-muted py-4">
+                                <td colspan="10" class="text-center text-muted py-4">
                                     <i class="bi bi-inbox"></i>
                                     <p class="mb-0">No subjects processed yet</p>
                                 </td>
                             </tr>
                         </tbody>
                     </table>
+                </div>
+            </div>
+            
+            <!-- Pagination for dashboard subjects -->
+            <div class="card-footer">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <small class="text-muted" id="dashboard-pagination-info">
+                            Showing 0 - 0 of 0 subjects
+                        </small>
+                    </div>
+                    
+                    <nav>
+                        <ul class="pagination pagination-sm mb-0" id="dashboard-pagination">
+                            <li class="page-item disabled">
+                                <a class="page-link" href="#" onclick="previousDashboardPage()">
+                                    <i class="bi bi-chevron-left"></i>
+                                </a>
+                            </li>
+                            <li class="page-item active">
+                                <a class="page-link" href="#">1</a>
+                            </li>
+                            <li class="page-item disabled">
+                                <a class="page-link" href="#" onclick="nextDashboardPage()">
+                                    <i class="bi bi-chevron-right"></i>
+                                </a>
+                            </li>
+                        </ul>
+                    </nav>
+                    
+                    <div>
+                        <select class="form-select form-select-sm" id="dashboard-page-size" onchange="changeDashboardPageSize()">
+                            <option value="10" selected>10 per page</option>
+                            <option value="25">25 per page</option>
+                            <option value="50">50 per page</option>
+                        </select>
+                    </div>
                 </div>
             </div>
         </div>
@@ -222,6 +425,247 @@
                         <p class="mt-2">Loading processing status...</p>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Filter Presets Modal -->
+<div class="modal fade" id="filter-presets-modal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Filter Presets</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>Saved Presets</h6>
+                        <div id="saved-presets-list" class="list-group">
+                            <div class="text-muted text-center py-3">
+                                <i class="bi bi-bookmark"></i>
+                                <p class="mb-0">No saved presets</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>Quick Presets</h6>
+                        <div class="list-group">
+                            <button class="list-group-item list-group-item-action" onclick="applyQuickPreset('failed_subjects')">
+                                <i class="bi bi-x-circle text-danger"></i>
+                                Failed Subjects Only
+                            </button>
+                            <button class="list-group-item list-group-item-action" onclick="applyQuickPreset('warning_subjects')">
+                                <i class="bi bi-exclamation-triangle text-warning"></i>
+                                Warning Subjects Only
+                            </button>
+                            <button class="list-group-item list-group-item-action" onclick="applyQuickPreset('pediatric_subjects')">
+                                <i class="bi bi-person text-info"></i>
+                                Pediatric Subjects Only
+                            </button>
+                            <button class="list-group-item list-group-item-action" onclick="applyQuickPreset('recent_subjects')">
+                                <i class="bi bi-clock text-primary"></i>
+                                Last 7 Days
+                            </button>
+                            <button class="list-group-item list-group-item-action" onclick="applyQuickPreset('high_quality')">
+                                <i class="bi bi-star text-success"></i>
+                                High Quality (Score > 0.8)
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Customize Dashboard View Modal -->
+<div class="modal fade" id="customize-view-modal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Customize Dashboard View</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row">
+                    <!-- Widget Visibility -->
+                    <div class="col-md-6">
+                        <h6>Dashboard Widgets</h6>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-summary-cards" checked>
+                            <label class="form-check-label" for="show-summary-cards">
+                                Summary Cards
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-quality-chart" checked>
+                            <label class="form-check-label" for="show-quality-chart">
+                                Quality Distribution Chart
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-age-chart" checked>
+                            <label class="form-check-label" for="show-age-chart">
+                                Age Distribution Chart
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-metrics-chart" checked>
+                            <label class="form-check-label" for="show-metrics-chart">
+                                Metrics Overview Chart
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-recent-activity" checked>
+                            <label class="form-check-label" for="show-recent-activity">
+                                Recent Activity
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-subjects-table" checked>
+                            <label class="form-check-label" for="show-subjects-table">
+                                Subjects Table
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- Table Columns -->
+                    <div class="col-md-6">
+                        <h6>Table Columns</h6>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-col-subject-id" checked disabled>
+                            <label class="form-check-label" for="show-col-subject-id">
+                                Subject ID <small class="text-muted">(required)</small>
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-col-age" checked>
+                            <label class="form-check-label" for="show-col-age">
+                                Age
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-col-age-group" checked>
+                            <label class="form-check-label" for="show-col-age-group">
+                                Age Group
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-col-scan-type" checked>
+                            <label class="form-check-label" for="show-col-scan-type">
+                                Scan Type
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-col-quality-status" checked>
+                            <label class="form-check-label" for="show-col-quality-status">
+                                Quality Status
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-col-score" checked>
+                            <label class="form-check-label" for="show-col-score">
+                                Composite Score
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-col-metrics" checked>
+                            <label class="form-check-label" for="show-col-metrics">
+                                Key Metrics
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="show-col-processed" checked>
+                            <label class="form-check-label" for="show-col-processed">
+                                Processing Date
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                
+                <hr>
+                
+                <div class="row">
+                    <!-- Refresh Settings -->
+                    <div class="col-md-6">
+                        <h6>Auto-Refresh</h6>
+                        <div class="mb-3">
+                            <label for="refresh-interval" class="form-label">Refresh Interval</label>
+                            <select class="form-select" id="refresh-interval">
+                                <option value="0">Disabled</option>
+                                <option value="15">15 seconds</option>
+                                <option value="30" selected>30 seconds</option>
+                                <option value="60">1 minute</option>
+                                <option value="300">5 minutes</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- Default View Settings -->
+                    <div class="col-md-6">
+                        <h6>Default Settings</h6>
+                        <div class="mb-3">
+                            <label for="default-page-size" class="form-label">Default Page Size</label>
+                            <select class="form-select" id="default-page-size">
+                                <option value="10" selected>10 subjects</option>
+                                <option value="25">25 subjects</option>
+                                <option value="50">50 subjects</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label for="default-sort" class="form-label">Default Sort</label>
+                            <select class="form-select" id="default-sort">
+                                <option value="processing_timestamp_desc" selected>Most Recent</option>
+                                <option value="subject_id_asc">Subject ID (A-Z)</option>
+                                <option value="composite_score_desc">Highest Score</option>
+                                <option value="composite_score_asc">Lowest Score</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" onclick="resetViewSettings()">Reset to Default</button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveViewSettings()">Save Settings</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bulk Update Quality Modal -->
+<div class="modal fade" id="dashboard-bulk-update-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Bulk Update Quality Status</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Update quality status for <span id="dashboard-selected-count">0</span> selected subjects:</p>
+                <div class="mb-3">
+                    <label for="dashboard-bulk-quality-status" class="form-label">New Quality Status</label>
+                    <select class="form-select" id="dashboard-bulk-quality-status">
+                        <option value="pass">Pass</option>
+                        <option value="warning">Warning</option>
+                        <option value="fail">Fail</option>
+                        <option value="uncertain">Uncertain</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label for="dashboard-bulk-update-reason" class="form-label">Reason (optional)</label>
+                    <textarea class="form-control" id="dashboard-bulk-update-reason" rows="3" 
+                              placeholder="Reason for quality status change..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="confirmDashboardBulkUpdate()">Update Selected</button>
             </div>
         </div>
     </div>

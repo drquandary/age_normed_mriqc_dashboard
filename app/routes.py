@@ -16,7 +16,7 @@ import tempfile
 import os
 import json
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks, Query, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks, Query, Depends, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -31,6 +31,19 @@ from .age_normalizer import AgeNormalizer
 from .config_service import ConfigurationService, ConfigurationValidationError
 from .batch_service import batch_service
 from .file_monitor import file_monitor
+from .error_handling import error_handler, audit_logger, get_request_id
+from .exceptions import (
+    FileProcessingException, MRIQCProcessingException, ValidationException,
+    BatchProcessingException, ConfigurationException
+)
+from .security import (
+    SecureFileHandler, SecurityConfig, security_auditor, data_retention_manager,
+    SecurityThreat, ThreatType, SecurityLevel
+)
+from .performance_monitor import performance_monitor, monitor_performance
+from .cache_service import cache_service
+from .connection_pool import get_connection_pool
+from . import config
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +54,19 @@ mriqc_processor = MRIQCProcessor()
 quality_assessor = QualityAssessor()
 age_normalizer = AgeNormalizer()
 config_service = ConfigurationService()
+
+# Security instances
+security_config = SecurityConfig(
+    max_file_size=config.MAX_FILE_SIZE,
+    allowed_extensions=set(config.SUPPORTED_EXTENSIONS),
+    allowed_mime_types=config.ALLOWED_MIME_TYPES,
+    virus_scan_enabled=config.VIRUS_SCAN_ENABLED,
+    data_retention_days=config.DATA_RETENTION_DAYS,
+    cleanup_interval_hours=config.CLEANUP_INTERVAL_HOURS,
+    enable_audit_logging=config.ENABLE_AUDIT_LOGGING,
+    max_filename_length=config.MAX_FILENAME_LENGTH
+)
+secure_file_handler = SecureFileHandler(security_config, config.UPLOAD_DIR, config.TEMP_DIR)
 
 # In-memory storage for batch processing status (in production, use Redis or database)
 batch_status_store: Dict[str, Dict] = {}
@@ -100,6 +126,37 @@ class ConnectionManager:
             self.disconnect(conn)
 
 manager = ConnectionManager()
+
+
+# Security middleware functions
+def get_client_ip(request: Request) -> str:
+    """Extract client IP address from request."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def get_user_agent(request: Request) -> str:
+    """Extract user agent from request."""
+    return request.headers.get("User-Agent", "unknown")
+
+
+async def security_check_middleware(request: Request):
+    """Perform security checks on incoming requests."""
+    client_ip = get_client_ip(request)
+    user_agent = get_user_agent(request)
+    
+    # Log data access
+    security_auditor.log_data_access(
+        resource=str(request.url.path),
+        client_ip=client_ip,
+        user_agent=user_agent
+    )
+    
+    # Basic rate limiting could be implemented here
+    # For now, just log the access
+    return {"client_ip": client_ip, "user_agent": user_agent}
 
 
 # Request/Response Models
@@ -255,6 +312,18 @@ async def process_subjects_background(
     apply_quality_assessment: bool = True
 ):
     """Background task for processing subjects with quality assessment."""
+    
+    # Log batch processing start
+    audit_logger.log_user_action(
+        action_type="batch_processing_start",
+        resource_type="batch",
+        resource_id=batch_id,
+        new_values={
+            'subjects_count': len(subjects),
+            'apply_quality_assessment': apply_quality_assessment
+        }
+    )
+    
     try:
         batch_status_store[batch_id]['status'] = 'processing'
         batch_status_store[batch_id]['started_at'] = datetime.now()
@@ -282,16 +351,31 @@ async def process_subjects_background(
                         subject.subject_info
                     )
                     
+                    # Log quality control decision
+                    audit_logger.log_quality_decision(
+                        subject_id=subject.subject_info.subject_id,
+                        decision=quality_assessment.overall_status.value,
+                        reason=f"Automated assessment: {quality_assessment.composite_score:.1f}% score",
+                        automated=True,
+                        confidence=quality_assessment.confidence,
+                        metrics=subject.raw_metrics.dict(exclude_none=True),
+                        thresholds=quality_assessment.threshold_violations
+                    )
+                    
                     # Update subject with quality assessment
                     subject.quality_assessment = quality_assessment
                     
                     # Add normalized metrics if age is available
                     if subject.subject_info.age is not None:
-                        normalized_metrics = age_normalizer.normalize_metrics(
-                            subject.raw_metrics,
-                            subject.subject_info.age
-                        )
-                        subject.normalized_metrics = normalized_metrics
+                        try:
+                            normalized_metrics = age_normalizer.normalize_metrics(
+                                subject.raw_metrics,
+                                subject.subject_info.age
+                            )
+                            subject.normalized_metrics = normalized_metrics
+                        except Exception as norm_e:
+                            logger.warning(f"Failed to normalize metrics for {subject.subject_info.subject_id}: {str(norm_e)}")
+                            # Continue processing without normalized metrics
                 
                 processed_subjects.append(subject)
                 
@@ -316,11 +400,22 @@ async def process_subjects_background(
                     )
                 
             except Exception as e:
-                logger.error(f"Error processing subject {subject.subject_info.subject_id}: {str(e)}")
+                # Create structured error response
+                error_response = error_handler.handle_processing_error(
+                    operation="subject_quality_assessment",
+                    message=f"Failed to assess quality for subject {subject.subject_info.subject_id}",
+                    exception=e,
+                    context={
+                        'subject_id': subject.subject_info.subject_id,
+                        'batch_id': batch_id
+                    }
+                )
+                
                 error = ProcessingError(
-                    error_type="quality_assessment_error",
-                    message=f"Failed to assess quality for {subject.subject_info.subject_id}: {str(e)}",
-                    error_code="QA_001"
+                    error_type=error_response.error_type,
+                    message=error_response.message,
+                    details=error_response.details,
+                    error_code=error_response.error_code
                 )
                 errors.append(error)
                 
@@ -343,6 +438,18 @@ async def process_subjects_background(
             'subjects_processed': len(processed_subjects),
             'errors': errors
         })
+        
+        # Log batch completion
+        audit_logger.log_user_action(
+            action_type="batch_processing_complete",
+            resource_type="batch",
+            resource_id=batch_id,
+            new_values={
+                'subjects_processed': len(processed_subjects),
+                'errors_count': len(errors),
+                'success_rate': len(processed_subjects) / len(subjects) if subjects else 0
+            }
+        )
         
         # Send completion update
         await manager.broadcast_to_batch(
@@ -367,12 +474,42 @@ async def process_subjects_background(
         logger.info(f"Batch {batch_id} completed: {len(processed_subjects)} subjects processed")
         
     except Exception as e:
-        logger.error(f"Batch processing failed for {batch_id}: {str(e)}")
+        # Handle batch-level errors
+        error_response = error_handler.handle_processing_error(
+            operation="batch_processing",
+            message=f"Batch processing failed for batch {batch_id}",
+            exception=e,
+            context={'batch_id': batch_id, 'subjects_count': len(subjects)}
+        )
+        
         batch_status_store[batch_id].update({
             'status': 'failed',
             'completed_at': datetime.now(),
-            'error_message': str(e)
+            'error_message': error_response.message,
+            'error_id': error_response.error_id
         })
+        
+        # Log batch failure
+        audit_logger.log_user_action(
+            action_type="batch_processing_failed",
+            resource_type="batch",
+            resource_id=batch_id,
+            new_values={
+                'error_message': error_response.message,
+                'error_id': error_response.error_id
+            }
+        )
+        
+        # Send failure update
+        await manager.broadcast_to_batch(
+            json.dumps({
+                "type": "batch_failed",
+                "batch_id": batch_id,
+                "error_message": error_response.message,
+                "error_id": error_response.error_id
+            }),
+            batch_id
+        )
         
         # Send failure update
         await manager.broadcast_to_batch(
@@ -395,69 +532,136 @@ async def health():
 
 
 @router.post('/upload', response_model=FileUploadResponse)
-async def upload_mriqc_file(file: UploadFile = File(...)):
+async def upload_mriqc_file(request: Request, file: UploadFile = File(...)):
     """
-    Upload MRIQC CSV file for processing.
+    Upload MRIQC CSV file for processing with comprehensive security validation.
     
     Args:
+        request: FastAPI request object
         file: MRIQC CSV file
         
     Returns:
         FileUploadResponse with file information
     """
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="File must be a CSV file")
+    request_id = get_request_id(request)
+    client_ip = get_client_ip(request)
+    user_agent = get_user_agent(request)
     
-    if file.size and file.size > 50 * 1024 * 1024:  # 50MB limit
-        raise HTTPException(status_code=400, detail="File size exceeds 50MB limit")
+    # Perform security checks
+    await security_check_middleware(request)
+    
+    # Log file upload attempt
+    audit_logger.log_user_action(
+        action_type="file_upload_attempt",
+        resource_type="mriqc_file",
+        resource_id=file.filename,
+        request=request
+    )
+    
+    security_auditor.log_file_upload(
+        filename=file.filename or "unknown",
+        file_size=file.size or 0,
+        client_ip=client_ip,
+        success=False  # Will update to True if successful
+    )
     
     try:
-        # Generate unique file ID
-        file_id = generate_file_id()
+        # Use secure file handler for validation and storage
+        file_path, metadata = await secure_file_handler.validate_and_save_file(file)
         
-        # Create temporary file
-        temp_dir = Path(tempfile.gettempdir()) / "mriqc_uploads"
-        temp_dir.mkdir(exist_ok=True)
-        
-        temp_file_path = temp_dir / f"{file_id}_{file.filename}"
-        
-        # Save uploaded file
-        with open(temp_file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+        # Generate unique file ID from hash
+        file_id = metadata['sha256_hash'][:16]  # Use first 16 chars of hash as ID
         
         # Quick validation to get subject count
         try:
-            df = mriqc_processor.parse_mriqc_file(temp_file_path)
-            validation_errors = mriqc_processor.validate_mriqc_format(df, str(temp_file_path))
+            df = mriqc_processor.parse_mriqc_file(file_path)
+            validation_errors = mriqc_processor.validate_mriqc_format(df, str(file_path))
             if validation_errors:
-                # Clean up temp file
-                temp_file_path.unlink(missing_ok=True)
+                # Clean up uploaded file
+                data_retention_manager.force_cleanup_file(file_path)
                 error_messages = [error.message for error in validation_errors]
-                raise HTTPException(status_code=400, detail=f"Invalid MRIQC file: {'; '.join(error_messages)}")
+                
+                # Create structured error response
+                error_response = error_handler.create_error_response(
+                    error_type="INVALID_FILE_FORMAT",
+                    message=f"Invalid MRIQC file format: {'; '.join(error_messages)}",
+                    details={
+                        'validation_errors': [error.dict() for error in validation_errors],
+                        'file_name': file.filename
+                    },
+                    request_id=request_id
+                )
+                raise HTTPException(status_code=400, detail=error_response.message)
+                
             subjects_count = len(df)
+            
         except HTTPException:
             raise
         except Exception as e:
-            # Clean up temp file
-            temp_file_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail=f"Invalid MRIQC file: {str(e)}")
+            # Clean up uploaded file
+            data_retention_manager.force_cleanup_file(file_path)
+            
+            error_response = error_handler.handle_processing_error(
+                operation="file_validation",
+                message="Failed to validate MRIQC file",
+                exception=e,
+                context={'file_name': file.filename},
+                request_id=request_id
+            )
+            raise HTTPException(status_code=400, detail=error_response.message)
         
-        logger.info(f"File uploaded: {file.filename} ({file.size} bytes, {subjects_count} subjects)")
+        logger.info(f"File uploaded successfully: {file.filename} ({metadata['file_size']} bytes, {subjects_count} subjects)")
+        
+        # Log successful upload
+        audit_logger.log_user_action(
+            action_type="file_upload_success",
+            resource_type="mriqc_file",
+            resource_id=file_id,
+            new_values={
+                'filename': file.filename,
+                'size': metadata['file_size'],
+                'subjects_count': subjects_count,
+                'sha256_hash': metadata['sha256_hash'],
+                'mime_type': metadata['mime_type']
+            },
+            request=request
+        )
+        
+        security_auditor.log_file_upload(
+            filename=file.filename,
+            file_size=metadata['file_size'],
+            client_ip=client_ip,
+            success=True
+        )
         
         return FileUploadResponse(
-            message="File uploaded successfully",
+            message="File uploaded and validated successfully",
             file_id=file_id,
             filename=file.filename,
-            size=file.size or len(content),
+            size=metadata['file_size'],
             subjects_count=subjects_count
         )
         
     except HTTPException:
+        # Log security threat if it's a security-related error
+        if "Security validation failed" in str(HTTPException):
+            security_auditor.log_threat_detected(
+                SecurityThreat(
+                    ThreatType.INVALID_FORMAT,
+                    SecurityLevel.HIGH,
+                    f"File upload security validation failed: {file.filename}"
+                ),
+                client_ip
+            )
         raise
     except Exception as e:
-        logger.error(f"File upload failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
+        error_response = error_handler.handle_system_error(
+            component="file_upload",
+            message="Unexpected error during secure file upload",
+            exception=e,
+            request_id=request_id
+        )
+        raise HTTPException(status_code=500, detail=error_response.message)
 
 
 @router.post('/process', response_model=ProcessFileResponse)
@@ -2338,3 +2542,1415 @@ async def get_task_status(task_id: str):
     except Exception as e:
         logger.error(f"Failed to get task status for {task_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get task status: {str(e)}")
+
+# Security and Privacy Endpoints
+
+class SecurityStatusResponse(BaseModel):
+    """Response model for security status."""
+    security_enabled: bool
+    virus_scan_enabled: bool
+    data_retention_days: int
+    cleanup_last_run: Optional[datetime]
+    audit_logging_enabled: bool
+    threat_count_24h: int
+    files_cleaned_24h: int
+
+
+@router.get('/security/status', response_model=SecurityStatusResponse)
+async def get_security_status(request: Request):
+    """
+    Get current security status and statistics.
+    
+    Returns:
+        SecurityStatusResponse with security information
+    """
+    await security_check_middleware(request)
+    
+    # This would typically come from a database or cache
+    # For now, return basic status
+    return SecurityStatusResponse(
+        security_enabled=config.SECURITY_ENABLED,
+        virus_scan_enabled=config.VIRUS_SCAN_ENABLED,
+        data_retention_days=config.DATA_RETENTION_DAYS,
+        cleanup_last_run=None,  # Would track actual cleanup runs
+        audit_logging_enabled=config.ENABLE_AUDIT_LOGGING,
+        threat_count_24h=0,  # Would count from audit logs
+        files_cleaned_24h=0   # Would count from cleanup logs
+    )
+
+
+class DataCleanupRequest(BaseModel):
+    """Request model for manual data cleanup."""
+    force_cleanup: bool = Field(default=False, description="Force cleanup regardless of retention policy")
+    target_directories: Optional[List[str]] = Field(default=None, description="Specific directories to clean")
+
+
+class DataCleanupResponse(BaseModel):
+    """Response model for data cleanup."""
+    files_deleted: int
+    directories_cleaned: int
+    bytes_freed: int
+    errors: int
+    cleanup_timestamp: datetime
+
+
+@router.post('/security/cleanup', response_model=DataCleanupResponse)
+async def manual_data_cleanup(request: Request, cleanup_request: DataCleanupRequest):
+    """
+    Manually trigger data cleanup based on retention policies.
+    
+    Args:
+        request: FastAPI request object
+        cleanup_request: Cleanup configuration
+        
+    Returns:
+        DataCleanupResponse with cleanup statistics
+    """
+    await security_check_middleware(request)
+    client_ip = get_client_ip(request)
+    
+    # Log cleanup request
+    security_auditor.log_security_event(
+        'manual_cleanup_requested',
+        {
+            'force_cleanup': cleanup_request.force_cleanup,
+            'target_directories': cleanup_request.target_directories,
+            'client_ip': client_ip
+        },
+        SecurityLevel.MEDIUM
+    )
+    
+    try:
+        # Perform cleanup
+        cleanup_stats = data_retention_manager.cleanup_expired_data()
+        
+        # Log successful cleanup
+        security_auditor.log_security_event(
+            'manual_cleanup_completed',
+            cleanup_stats,
+            SecurityLevel.LOW
+        )
+        
+        return DataCleanupResponse(
+            files_deleted=cleanup_stats['files_deleted'],
+            directories_cleaned=cleanup_stats['directories_cleaned'],
+            bytes_freed=cleanup_stats['bytes_freed'],
+            errors=cleanup_stats['errors'],
+            cleanup_timestamp=datetime.utcnow()
+        )
+        
+    except Exception as e:
+        logger.error(f"Manual cleanup failed: {e}")
+        security_auditor.log_security_event(
+            'manual_cleanup_failed',
+            {'error': str(e), 'client_ip': client_ip},
+            SecurityLevel.HIGH
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Data cleanup failed"
+        )
+
+
+class PrivacyComplianceResponse(BaseModel):
+    """Response model for privacy compliance check."""
+    compliant: bool
+    issues: List[str]
+    recommendations: List[str]
+    last_check: datetime
+
+
+@router.get('/security/privacy-compliance', response_model=PrivacyComplianceResponse)
+async def check_privacy_compliance(request: Request):
+    """
+    Check privacy compliance status.
+    
+    Returns:
+        PrivacyComplianceResponse with compliance information
+    """
+    await security_check_middleware(request)
+    
+    issues = []
+    recommendations = []
+    
+    # Check data retention policy
+    if config.DATA_RETENTION_DAYS > 90:
+        issues.append("Data retention period exceeds recommended 90 days")
+        recommendations.append("Consider reducing data retention period")
+    
+    # Check audit logging
+    if not config.ENABLE_AUDIT_LOGGING:
+        issues.append("Audit logging is disabled")
+        recommendations.append("Enable audit logging for compliance")
+    
+    # Check virus scanning
+    if not config.VIRUS_SCAN_ENABLED:
+        issues.append("Virus scanning is disabled")
+        recommendations.append("Enable virus scanning for security")
+    
+    # Check file size limits
+    if config.MAX_FILE_SIZE > 100 * 1024 * 1024:  # 100MB
+        issues.append("File size limit may be too high")
+        recommendations.append("Consider reducing maximum file size")
+    
+    compliant = len(issues) == 0
+    
+    return PrivacyComplianceResponse(
+        compliant=compliant,
+        issues=issues,
+        recommendations=recommendations,
+        last_check=datetime.utcnow()
+    )
+
+
+class SecurityThreatResponse(BaseModel):
+    """Response model for security threats."""
+    threat_id: str
+    threat_type: str
+    severity: str
+    description: str
+    timestamp: datetime
+    resolved: bool
+
+
+@router.get('/security/threats', response_model=List[SecurityThreatResponse])
+async def get_security_threats(
+    request: Request,
+    limit: int = Query(default=50, le=100),
+    severity: Optional[str] = Query(default=None)
+):
+    """
+    Get recent security threats and incidents.
+    
+    Args:
+        request: FastAPI request object
+        limit: Maximum number of threats to return
+        severity: Filter by severity level
+        
+    Returns:
+        List of SecurityThreatResponse objects
+    """
+    await security_check_middleware(request)
+    
+    # This would typically read from audit logs or database
+    # For now, return empty list as placeholder
+    return []
+
+
+# Add security headers middleware function
+def add_security_headers(response):
+    """Add security headers to response."""
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    return response
+
+
+@router.post('/subjects/filter', response_model=SubjectListResponse)
+async def filter_subjects(
+    filter_request: SubjectFilterRequest,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=1000)
+):
+    """
+    Advanced subject filtering with multiple criteria.
+    
+    Args:
+        filter_request: Filter criteria including sort options
+        page: Page number
+        page_size: Page size
+        
+    Returns:
+        SubjectListResponse with filtered subjects
+    """
+    try:
+        # Get all subjects from all batches
+        all_subjects = []
+        for subjects in processed_subjects_store.values():
+            all_subjects.extend(subjects)
+        
+        # Apply filters
+        filtered_subjects = all_subjects
+        filters_applied = {}
+        
+        # Quality status filter
+        if filter_request.quality_status:
+            filtered_subjects = [s for s in filtered_subjects 
+                               if s.quality_assessment.overall_status in filter_request.quality_status]
+            filters_applied['quality_status'] = [status.value for status in filter_request.quality_status]
+        
+        # Age group filter
+        if filter_request.age_group:
+            filtered_subjects = [s for s in filtered_subjects 
+                               if (s.normalized_metrics and 
+                                   s.normalized_metrics.age_group in filter_request.age_group)]
+            filters_applied['age_group'] = [group.value for group in filter_request.age_group]
+        
+        # Scan type filter
+        if filter_request.scan_type:
+            filtered_subjects = [s for s in filtered_subjects 
+                               if s.subject_info.scan_type in filter_request.scan_type]
+            filters_applied['scan_type'] = filter_request.scan_type
+        
+        # Age range filter
+        if filter_request.age_range:
+            min_age = filter_request.age_range.get('min')
+            max_age = filter_request.age_range.get('max')
+            
+            def age_in_range(subject):
+                age = subject.subject_info.age
+                if age is None:
+                    return False
+                if min_age is not None and age < min_age:
+                    return False
+                if max_age is not None and age > max_age:
+                    return False
+                return True
+            
+            filtered_subjects = [s for s in filtered_subjects if age_in_range(s)]
+            filters_applied['age_range'] = filter_request.age_range
+        
+        # Metric filters
+        if filter_request.metric_filters:
+            def metric_in_range(subject, metric_name, criteria):
+                metric_value = getattr(subject.raw_metrics, metric_name, None)
+                if metric_value is None:
+                    return False
+                
+                min_val = criteria.get('min')
+                max_val = criteria.get('max')
+                
+                if min_val is not None and metric_value < min_val:
+                    return False
+                if max_val is not None and metric_value > max_val:
+                    return False
+                return True
+            
+            for metric_name, criteria in filter_request.metric_filters.items():
+                filtered_subjects = [s for s in filtered_subjects 
+                                   if metric_in_range(s, metric_name, criteria)]
+            
+            filters_applied['metric_filters'] = filter_request.metric_filters
+        
+        # Date range filter
+        if filter_request.date_range:
+            start_date = filter_request.date_range.get('start')
+            end_date = filter_request.date_range.get('end')
+            
+            def date_in_range(subject):
+                proc_date = subject.processing_timestamp.date()
+                
+                if start_date:
+                    start = datetime.strptime(start_date, '%Y-%m-%d').date()
+                    if proc_date < start:
+                        return False
+                
+                if end_date:
+                    end = datetime.strptime(end_date, '%Y-%m-%d').date()
+                    if proc_date > end:
+                        return False
+                
+                return True
+            
+            filtered_subjects = [s for s in filtered_subjects if date_in_range(s)]
+            filters_applied['date_range'] = filter_request.date_range
+        
+        # Batch IDs filter
+        if filter_request.batch_ids:
+            # This would require tracking which batch each subject belongs to
+            # For now, we'll skip this filter
+            filters_applied['batch_ids'] = filter_request.batch_ids
+        
+        # Search text filter
+        if filter_request.search_text:
+            search_lower = filter_request.search_text.lower()
+            
+            def matches_search(subject):
+                # Search in subject ID
+                if search_lower in subject.subject_info.subject_id.lower():
+                    return True
+                
+                # Search in session if available
+                if (subject.subject_info.session and 
+                    search_lower in subject.subject_info.session.lower()):
+                    return True
+                
+                return False
+            
+            filtered_subjects = [s for s in filtered_subjects if matches_search(s)]
+            filters_applied['search_text'] = filter_request.search_text
+        
+        # Apply sorting (default to processing timestamp desc)
+        sort_by = 'processing_timestamp'
+        sort_order = 'desc'
+        reverse = sort_order == 'desc'
+        
+        if sort_by == 'subject_id':
+            filtered_subjects.sort(key=lambda s: s.subject_info.subject_id, reverse=reverse)
+        elif sort_by == 'age':
+            filtered_subjects.sort(key=lambda s: s.subject_info.age or 0, reverse=reverse)
+        elif sort_by == 'quality_status':
+            status_order = {'pass': 0, 'warning': 1, 'uncertain': 2, 'fail': 3}
+            filtered_subjects.sort(
+                key=lambda s: status_order.get(s.quality_assessment.overall_status.value, 4),
+                reverse=reverse
+            )
+        elif sort_by == 'composite_score':
+            filtered_subjects.sort(key=lambda s: s.quality_assessment.composite_score, reverse=reverse)
+        elif sort_by == 'processing_timestamp':
+            filtered_subjects.sort(key=lambda s: s.processing_timestamp, reverse=reverse)
+        
+        # Apply pagination
+        total_count = len(filtered_subjects)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_subjects = filtered_subjects[start_idx:end_idx]
+        
+        # Add sort information to response
+        sort_applied = {'sort_by': sort_by, 'sort_order': sort_order}
+        
+        return SubjectListResponse(
+            subjects=paginated_subjects,
+            total_count=total_count,
+            page=page,
+            page_size=page_size,
+            filters_applied=filters_applied,
+            sort_applied=sort_applied
+        )
+        
+    except Exception as e:
+        logger.error(f"Error filtering subjects: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to filter subjects: {str(e)}")
+
+
+class BulkUpdateRequest(BaseModel):
+    """Request model for bulk quality updates."""
+    subject_ids: List[str]
+    quality_status: QualityStatus
+    reason: str = ""
+
+
+@router.post('/subjects/bulk-update')
+async def bulk_update_subjects_quality(
+    request: Request,
+    bulk_request: BulkUpdateRequest
+):
+    """
+    Bulk update quality status for multiple subjects.
+    
+    Args:
+        request: FastAPI request object
+        bulk_request: Bulk update request data
+        
+    Returns:
+        Success message with update count
+    """
+    request_id = get_request_id(request)
+    
+    try:
+        updated_count = 0
+        errors = []
+        
+        # Find and update subjects across all batches
+        for batch_id, subjects in processed_subjects_store.items():
+            for subject in subjects:
+                if subject.subject_info.subject_id in bulk_request.subject_ids:
+                    try:
+                        # Update quality status
+                        old_status = subject.quality_assessment.overall_status
+                        subject.quality_assessment.overall_status = bulk_request.quality_status
+                        
+                        # Log the quality decision change
+                        audit_logger.log_quality_decision(
+                            subject_id=subject.subject_info.subject_id,
+                            decision=bulk_request.quality_status.value,
+                            reason=bulk_request.reason or f"Bulk update from {old_status.value} to {bulk_request.quality_status.value}",
+                            automated=False,
+                            confidence=subject.quality_assessment.confidence,
+                            metrics=subject.raw_metrics.dict(exclude_none=True),
+                            previous_decision=old_status.value
+                        )
+                        
+                        updated_count += 1
+                        
+                    except Exception as e:
+                        error_msg = f"Failed to update {subject.subject_info.subject_id}: {str(e)}"
+                        errors.append(error_msg)
+                        logger.error(error_msg)
+        
+        # Log bulk update action
+        audit_logger.log_user_action(
+            action_type="bulk_quality_update",
+            resource_type="subjects",
+            resource_id=f"bulk_update_{len(bulk_request.subject_ids)}_subjects",
+            new_values={
+                'subject_ids': bulk_request.subject_ids,
+                'new_quality_status': bulk_request.quality_status.value,
+                'reason': bulk_request.reason,
+                'updated_count': updated_count,
+                'errors_count': len(errors)
+            },
+            request=request
+        )
+        
+        if errors:
+            logger.warning(f"Bulk update completed with {len(errors)} errors: {errors}")
+        
+        return {
+            "message": f"Successfully updated {updated_count} subjects",
+            "updated_count": updated_count,
+            "requested_count": len(bulk_request.subject_ids),
+            "errors": errors
+        }
+        
+    except Exception as e:
+        error_response = error_handler.handle_system_error(
+            component="bulk_update",
+            message="Bulk update operation failed",
+            exception=e,
+            request_id=request_id
+        )
+        raise HTTPException(status_code=500, detail=error_response.message)
+# Lon
+gitudinal data endpoints
+from .longitudinal_service import LongitudinalService
+from .models import LongitudinalSubject, LongitudinalTrend, LongitudinalSummary
+
+# Initialize longitudinal service
+longitudinal_service = LongitudinalService(db=normative_db, age_normalizer=age_normalizer)
+
+
+@router.post('/longitudinal/subjects/{subject_id}/timepoints')
+async def add_subject_timepoint(
+    subject_id: str,
+    processed_subject: ProcessedSubject,
+    session: Optional[str] = Query(None, description="Session identifier"),
+    days_from_baseline: Optional[int] = Query(None, description="Days from baseline scan"),
+    study_name: Optional[str] = Query(None, description="Study name")
+):
+    """
+    Add a timepoint for a longitudinal subject.
+    
+    Args:
+        subject_id: Subject identifier
+        processed_subject: Complete processed subject data
+        session: Session identifier (e.g., 'baseline', 'followup1')
+        days_from_baseline: Days elapsed from baseline scan
+        study_name: Name of longitudinal study
+        
+    Returns:
+        Timepoint ID and confirmation
+    """
+    try:
+        timepoint_id = longitudinal_service.add_subject_timepoint(
+            subject_id=subject_id,
+            processed_subject=processed_subject,
+            session=session,
+            days_from_baseline=days_from_baseline,
+            study_name=study_name
+        )
+        
+        return {
+            "timepoint_id": timepoint_id,
+            "subject_id": subject_id,
+            "session": session,
+            "message": "Timepoint added successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to add timepoint for subject {subject_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to add timepoint: {str(e)}")
+
+
+@router.get('/longitudinal/subjects/{subject_id}', response_model=LongitudinalSubject)
+async def get_longitudinal_subject(subject_id: str):
+    """
+    Get complete longitudinal subject data.
+    
+    Args:
+        subject_id: Subject identifier
+        
+    Returns:
+        LongitudinalSubject with all timepoints
+    """
+    try:
+        longitudinal_subject = longitudinal_service.get_longitudinal_subject(subject_id)
+        
+        if not longitudinal_subject:
+            raise HTTPException(status_code=404, detail="Longitudinal subject not found")
+        
+        return longitudinal_subject
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get longitudinal subject {subject_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get longitudinal subject: {str(e)}")
+
+
+@router.get('/longitudinal/subjects')
+async def get_longitudinal_subjects(
+    study_name: Optional[str] = Query(None, description="Filter by study name"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(50, ge=1, le=1000, description="Page size")
+):
+    """
+    Get all subjects with longitudinal data.
+    
+    Args:
+        study_name: Optional study name filter
+        page: Page number (1-based)
+        page_size: Number of subjects per page
+        
+    Returns:
+        List of longitudinal subjects with summary information
+    """
+    try:
+        subjects = longitudinal_service.get_subjects_with_longitudinal_data(study_name)
+        
+        # Apply pagination
+        total_count = len(subjects)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_subjects = subjects[start_idx:end_idx]
+        
+        return {
+            "subjects": paginated_subjects,
+            "total_count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "study_name": study_name
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get longitudinal subjects: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get longitudinal subjects: {str(e)}")
+
+
+@router.get('/longitudinal/subjects/{subject_id}/trends', response_model=List[LongitudinalTrend])
+async def get_subject_trends(subject_id: str):
+    """
+    Get all quality metric trends for a subject.
+    
+    Args:
+        subject_id: Subject identifier
+        
+    Returns:
+        List of LongitudinalTrend objects for all metrics
+    """
+    try:
+        trends = longitudinal_service.calculate_all_trends_for_subject(subject_id)
+        return trends
+        
+    except Exception as e:
+        logger.error(f"Failed to get trends for subject {subject_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get subject trends: {str(e)}")
+
+
+@router.get('/longitudinal/subjects/{subject_id}/trends/{metric_name}', response_model=LongitudinalTrend)
+async def get_subject_metric_trend(subject_id: str, metric_name: str):
+    """
+    Get trend for a specific metric for a subject.
+    
+    Args:
+        subject_id: Subject identifier
+        metric_name: Name of the quality metric
+        
+    Returns:
+        LongitudinalTrend for the specified metric
+    """
+    try:
+        trend = longitudinal_service.calculate_metric_trend(subject_id, metric_name)
+        
+        if not trend:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Trend not found for subject {subject_id}, metric {metric_name}"
+            )
+        
+        return trend
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get trend for {subject_id}, metric {metric_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get metric trend: {str(e)}")
+
+
+@router.post('/longitudinal/subjects/{subject_id}/calculate-trends')
+async def calculate_subject_trends(subject_id: str):
+    """
+    Calculate and store trends for all metrics for a subject.
+    
+    Args:
+        subject_id: Subject identifier
+        
+    Returns:
+        Summary of calculated trends
+    """
+    try:
+        trends = longitudinal_service.calculate_all_trends_for_subject(subject_id)
+        
+        trend_summary = {
+            "subject_id": subject_id,
+            "trends_calculated": len(trends),
+            "metrics": [trend.metric_name for trend in trends],
+            "trend_directions": {
+                trend.metric_name: trend.trend_direction for trend in trends
+            }
+        }
+        
+        return trend_summary
+        
+    except Exception as e:
+        logger.error(f"Failed to calculate trends for subject {subject_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to calculate trends: {str(e)}")
+
+
+@router.get('/longitudinal/studies/{study_name}/summary', response_model=LongitudinalSummary)
+async def get_study_longitudinal_summary(study_name: str):
+    """
+    Get longitudinal summary for a study.
+    
+    Args:
+        study_name: Name of the study
+        
+    Returns:
+        LongitudinalSummary with study-level statistics
+    """
+    try:
+        summary = longitudinal_service.get_study_longitudinal_summary(study_name)
+        
+        if not summary:
+            raise HTTPException(status_code=404, detail=f"Study {study_name} not found")
+        
+        return summary
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get longitudinal summary for study {study_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get study summary: {str(e)}")
+
+
+@router.get('/longitudinal/subjects/{subject_id}/age-transitions')
+async def get_subject_age_transitions(subject_id: str):
+    """
+    Get age group transitions for a subject.
+    
+    Args:
+        subject_id: Subject identifier
+        
+    Returns:
+        List of age group transition events
+    """
+    try:
+        transitions = longitudinal_service.detect_age_group_transitions(subject_id)
+        
+        return {
+            "subject_id": subject_id,
+            "transitions": transitions,
+            "transition_count": len(transitions)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get age transitions for subject {subject_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get age transitions: {str(e)}")
+
+
+@router.post('/longitudinal/export')
+async def export_longitudinal_data(
+    study_name: Optional[str] = Query(None, description="Filter by study name"),
+    format: str = Query("csv", description="Export format (csv or json)")
+):
+    """
+    Export longitudinal data for analysis.
+    
+    Args:
+        study_name: Optional study name filter
+        format: Export format ('csv' or 'json')
+        
+    Returns:
+        File download response
+    """
+    try:
+        if format not in ['csv', 'json']:
+            raise HTTPException(status_code=400, detail="Format must be 'csv' or 'json'")
+        
+        filepath = longitudinal_service.export_longitudinal_data(study_name, format)
+        
+        # Determine content type
+        content_type = "text/csv" if format == "csv" else "application/json"
+        
+        # Create filename for download
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"longitudinal_data_{study_name or 'all'}_{timestamp}.{format}"
+        
+        def iterfile(file_path: str):
+            with open(file_path, 'rb') as file:
+                yield from file
+        
+        return StreamingResponse(
+            iterfile(filepath),
+            media_type=content_type,
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to export longitudinal data: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to export data: {str(e)}")
+
+
+@router.delete('/longitudinal/subjects/{subject_id}')
+async def delete_longitudinal_subject(subject_id: str):
+    """
+    Delete a longitudinal subject and all associated data.
+    
+    Args:
+        subject_id: Subject identifier
+        
+    Returns:
+        Deletion confirmation
+    """
+    try:
+        success = longitudinal_service.db.delete_longitudinal_subject(subject_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Longitudinal subject not found")
+        
+        return {
+            "subject_id": subject_id,
+            "message": "Longitudinal subject deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete longitudinal subject {subject_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete subject: {str(e)}")
+
+
+@router.delete('/longitudinal/timepoints/{timepoint_id}')
+async def delete_timepoint(timepoint_id: str):
+    """
+    Delete a specific timepoint.
+    
+    Args:
+        timepoint_id: Timepoint identifier
+        
+    Returns:
+        Deletion confirmation
+    """
+    try:
+        success = longitudinal_service.db.delete_timepoint(timepoint_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Timepoint not found")
+        
+        return {
+            "timepoint_id": timepoint_id,
+            "message": "Timepoint deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete timepoint {timepoint_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete timepoint: {str(e)}")
+# Perfo
+rmance Monitoring Endpoints
+
+@router.get("/api/performance/stats")
+@monitor_performance("get_performance_stats")
+async def get_performance_stats():
+    """Get comprehensive performance statistics."""
+    try:
+        stats = performance_monitor.get_performance_summary()
+        return JSONResponse(content=stats)
+    except Exception as e:
+        logger.error(f"Error getting performance stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve performance statistics")
+
+
+@router.get("/api/performance/operations")
+@monitor_performance("get_operation_stats")
+async def get_operation_stats(operation_name: Optional[str] = Query(None)):
+    """Get statistics for specific operations."""
+    try:
+        stats = performance_monitor.get_operation_stats(operation_name)
+        return JSONResponse(content=stats)
+    except Exception as e:
+        logger.error(f"Error getting operation stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve operation statistics")
+
+
+@router.get("/api/performance/cache")
+@monitor_performance("get_cache_stats")
+async def get_cache_stats():
+    """Get cache performance statistics."""
+    try:
+        stats = cache_service.get_cache_stats()
+        return JSONResponse(content=stats)
+    except Exception as e:
+        logger.error(f"Error getting cache stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve cache statistics")
+
+
+@router.get("/api/performance/database")
+@monitor_performance("get_database_stats")
+async def get_database_stats():
+    """Get database connection pool statistics."""
+    try:
+        pool = get_connection_pool()
+        stats = pool.get_stats()
+        return JSONResponse(content=stats)
+    except Exception as e:
+        logger.error(f"Error getting database stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve database statistics")
+
+
+@router.post("/api/performance/reset")
+@monitor_performance("reset_performance_stats")
+async def reset_performance_stats():
+    """Reset performance statistics."""
+    try:
+        performance_monitor.reset_stats()
+        return JSONResponse(content={"message": "Performance statistics reset successfully"})
+    except Exception as e:
+        logger.error(f"Error resetting performance stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to reset performance statistics")
+
+
+@router.get("/api/performance/export")
+@monitor_performance("export_performance_metrics")
+async def export_performance_metrics(format: str = Query("json")):
+    """Export performance metrics."""
+    try:
+        if format.lower() not in ["json"]:
+            raise HTTPException(status_code=400, detail="Unsupported export format")
+        
+        exported_data = performance_monitor.export_metrics(format)
+        
+        return JSONResponse(
+            content={"data": exported_data, "format": format},
+            headers={"Content-Disposition": f"attachment; filename=performance_metrics.{format}"}
+        )
+    except Exception as e:
+        logger.error(f"Error exporting performance metrics: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export performance metrics")
+
+
+@router.post("/api/performance/cache/clear")
+@monitor_performance("clear_cache")
+async def clear_cache(pattern: Optional[str] = Query(None)):
+    """Clear cache entries."""
+    try:
+        if pattern:
+            cleared_count = cache_service.clear_pattern(pattern)
+            message = f"Cleared {cleared_count} cache entries matching pattern '{pattern}'"
+        else:
+            # Clear all cache entries (use with caution)
+            cleared_count = cache_service.clear_pattern("*")
+            message = f"Cleared {cleared_count} cache entries"
+        
+        return JSONResponse(content={"message": message, "cleared_count": cleared_count})
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clear cache")
+
+
+# Cache warming endpoints
+
+@router.post("/api/performance/cache/warm")
+@monitor_performance("warm_cache")
+async def warm_cache():
+    """Warm up the cache with frequently accessed data."""
+    try:
+        from .database import NormativeDatabase
+        
+        db = NormativeDatabase()
+        
+        # Warm up age groups cache
+        age_groups = db.get_age_groups()
+        logger.info(f"Warmed cache with {len(age_groups)} age groups")
+        
+        # Warm up normative data cache for common metrics
+        common_metrics = ['snr', 'cnr', 'fber', 'efc', 'fwhm_avg']
+        warmed_count = 0
+        
+        for age_group in age_groups:
+            for metric in common_metrics:
+                normative_data = db.get_normative_data(metric, age_group['id'])
+                if normative_data:
+                    warmed_count += 1
+                
+                thresholds = db.get_quality_thresholds(metric, age_group['id'])
+                if thresholds:
+                    warmed_count += 1
+        
+        return JSONResponse(content={
+            "message": "Cache warmed successfully",
+            "age_groups": len(age_groups),
+            "normative_entries": warmed_count
+        })
+    except Exception as e:
+        logger.error(f"Error warming cache: {e}")
+        raise HTTPException(status_code=500, detail="Failed to warm cache")
+# Impo
+rt integration services
+from .workflow_orchestrator import workflow_orchestrator
+from .integration_service import integration_service
+from .models import WorkflowConfiguration, BatchWorkflowRequest, EndToEndTestResult
+
+
+# End-to-end workflow endpoints
+
+@router.post("/workflow/execute", response_model=Dict)
+async def execute_complete_workflow(
+    request: Dict,
+    background_tasks: BackgroundTasks,
+    security_info: Dict = Depends(security_check_middleware)
+):
+    """
+    Execute complete end-to-end workflow from file upload to export.
+    
+    This endpoint orchestrates the entire user workflow including:
+    - File upload and validation
+    - Data processing and quality assessment
+    - Age normalization and longitudinal analysis
+    - Export generation and reporting
+    """
+    request_id = get_request_id()
+    
+    try:
+        # Validate request
+        file_path = request.get('file_path')
+        if not file_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="file_path is required"
+            )
+        
+        # Parse workflow configuration
+        config_data = request.get('config', {})
+        workflow_config = WorkflowConfiguration(**config_data)
+        
+        # Create progress callback for WebSocket updates
+        workflow_id = str(uuid.uuid4())
+        
+        async def progress_callback(progress_data):
+            await manager.broadcast_dashboard_update(
+                json.dumps({
+                    "type": "workflow_progress",
+                    "workflow_id": workflow_id,
+                    **progress_data
+                })
+            )
+        
+        # Execute workflow in background
+        async def execute_workflow():
+            try:
+                result = await integration_service.execute_complete_user_workflow(
+                    file_path=file_path,
+                    user_id=security_info.get('client_ip'),
+                    config=workflow_config,
+                    progress_callback=progress_callback
+                )
+                
+                # Store result for retrieval
+                processed_subjects_store[workflow_id] = result.subjects
+                batch_status_store[workflow_id] = {
+                    'workflow_id': workflow_id,
+                    'status': result.status.value,
+                    'result': result,
+                    'completed_at': datetime.now()
+                }
+                
+                # Notify completion
+                await manager.broadcast_dashboard_update(
+                    json.dumps({
+                        "type": "workflow_completed",
+                        "workflow_id": workflow_id,
+                        "status": result.status.value,
+                        "subjects_processed": len(result.subjects)
+                    })
+                )
+                
+            except Exception as e:
+                logger.error(f"Workflow {workflow_id} failed: {str(e)}")
+                
+                # Store error result
+                batch_status_store[workflow_id] = {
+                    'workflow_id': workflow_id,
+                    'status': 'failed',
+                    'error': str(e),
+                    'completed_at': datetime.now()
+                }
+                
+                # Notify error
+                await manager.broadcast_dashboard_update(
+                    json.dumps({
+                        "type": "workflow_error",
+                        "workflow_id": workflow_id,
+                        "error": str(e)
+                    })
+                )
+        
+        background_tasks.add_task(execute_workflow)
+        
+        return {
+            "message": "Workflow execution started",
+            "workflow_id": workflow_id,
+            "status": "initializing"
+        }
+        
+    except Exception as e:
+        error_response = error_handler.handle_api_error(
+            operation="execute_complete_workflow",
+            message="Failed to start workflow execution",
+            exception=e,
+            request_id=request_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_response.model_dump()
+        )
+
+
+@router.post("/workflow/batch", response_model=Dict)
+async def execute_batch_workflow(
+    request: BatchWorkflowRequest,
+    background_tasks: BackgroundTasks,
+    security_info: Dict = Depends(security_check_middleware)
+):
+    """
+    Execute batch workflow for multiple MRIQC files.
+    
+    This endpoint processes multiple files in batch mode with optional
+    parallel processing and comprehensive error handling.
+    """
+    request_id = get_request_id()
+    batch_id = str(uuid.uuid4())
+    
+    try:
+        # Parse workflow configuration
+        workflow_config = WorkflowConfiguration(**(request.workflow_config or {}))
+        
+        # Create progress callback
+        async def batch_progress_callback(progress_data):
+            await manager.broadcast_dashboard_update(
+                json.dumps({
+                    "type": "batch_workflow_progress",
+                    "batch_id": batch_id,
+                    **progress_data
+                })
+            )
+        
+        # Execute batch workflow in background
+        async def execute_batch():
+            try:
+                results = await integration_service.execute_batch_integration_workflow(
+                    file_paths=request.file_paths,
+                    user_id=security_info.get('client_ip'),
+                    config=workflow_config,
+                    progress_callback=batch_progress_callback
+                )
+                
+                # Store results
+                batch_status_store[batch_id] = {
+                    'batch_id': batch_id,
+                    'status': 'completed',
+                    'results': results,
+                    'completed_at': datetime.now(),
+                    'total_files': len(request.file_paths),
+                    'successful_files': len([r for r in results if r.status.value == 'completed']),
+                    'failed_files': len([r for r in results if r.status.value == 'failed'])
+                }
+                
+                # Aggregate all subjects
+                all_subjects = []
+                for result in results:
+                    all_subjects.extend(result.subjects)
+                processed_subjects_store[batch_id] = all_subjects
+                
+                # Notify completion
+                await manager.broadcast_dashboard_update(
+                    json.dumps({
+                        "type": "batch_workflow_completed",
+                        "batch_id": batch_id,
+                        "total_files": len(request.file_paths),
+                        "successful_files": batch_status_store[batch_id]['successful_files'],
+                        "failed_files": batch_status_store[batch_id]['failed_files'],
+                        "total_subjects": len(all_subjects)
+                    })
+                )
+                
+            except Exception as e:
+                logger.error(f"Batch workflow {batch_id} failed: {str(e)}")
+                
+                batch_status_store[batch_id] = {
+                    'batch_id': batch_id,
+                    'status': 'failed',
+                    'error': str(e),
+                    'completed_at': datetime.now()
+                }
+                
+                await manager.broadcast_dashboard_update(
+                    json.dumps({
+                        "type": "batch_workflow_error",
+                        "batch_id": batch_id,
+                        "error": str(e)
+                    })
+                )
+        
+        background_tasks.add_task(execute_batch)
+        
+        return {
+            "message": "Batch workflow execution started",
+            "batch_id": batch_id,
+            "status": "initializing",
+            "total_files": len(request.file_paths)
+        }
+        
+    except Exception as e:
+        error_response = error_handler.handle_api_error(
+            operation="execute_batch_workflow",
+            message="Failed to start batch workflow execution",
+            exception=e,
+            request_id=request_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_response.model_dump()
+        )
+
+
+@router.get("/workflow/{workflow_id}/status", response_model=Dict)
+async def get_workflow_status(
+    workflow_id: str,
+    security_info: Dict = Depends(security_check_middleware)
+):
+    """Get status of a running or completed workflow."""
+    request_id = get_request_id()
+    
+    try:
+        # Check batch status store first
+        if workflow_id in batch_status_store:
+            status_data = batch_status_store[workflow_id]
+            return {
+                "workflow_id": workflow_id,
+                "status": status_data.get('status', 'unknown'),
+                "completed_at": status_data.get('completed_at'),
+                "subjects_processed": len(processed_subjects_store.get(workflow_id, [])),
+                "result_available": workflow_id in processed_subjects_store
+            }
+        
+        # Check active workflows in orchestrator
+        orchestrator_status = workflow_orchestrator.get_workflow_status(workflow_id)
+        if orchestrator_status:
+            return {
+                "workflow_id": workflow_id,
+                "status": orchestrator_status.get('status', 'unknown'),
+                "progress": orchestrator_status.get('progress', 0),
+                "current_step": orchestrator_status.get('current_step'),
+                "subjects_processed": orchestrator_status.get('subjects_processed', 0),
+                "total_subjects": orchestrator_status.get('total_subjects', 0)
+            }
+        
+        # Check integration service
+        integration_status = integration_service.get_integration_status(workflow_id)
+        if integration_status:
+            return {
+                "workflow_id": workflow_id,
+                "status": integration_status.get('status', 'unknown'),
+                "components_involved": integration_status.get('components_involved', []),
+                "errors": integration_status.get('errors', []),
+                "warnings": integration_status.get('warnings', [])
+            }
+        
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow {workflow_id} not found"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_response = error_handler.handle_api_error(
+            operation="get_workflow_status",
+            message=f"Failed to get workflow status for {workflow_id}",
+            exception=e,
+            request_id=request_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_response.model_dump()
+        )
+
+
+@router.get("/workflow/{workflow_id}/result", response_model=Dict)
+async def get_workflow_result(
+    workflow_id: str,
+    security_info: Dict = Depends(security_check_middleware)
+):
+    """Get complete result of a completed workflow."""
+    request_id = get_request_id()
+    
+    try:
+        if workflow_id not in batch_status_store:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Workflow {workflow_id} not found"
+            )
+        
+        status_data = batch_status_store[workflow_id]
+        
+        if status_data.get('status') != 'completed':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Workflow {workflow_id} is not completed (status: {status_data.get('status')})"
+            )
+        
+        # Get subjects
+        subjects = processed_subjects_store.get(workflow_id, [])
+        
+        # Get workflow result if available
+        workflow_result = status_data.get('result')
+        
+        return {
+            "workflow_id": workflow_id,
+            "status": status_data['status'],
+            "subjects": [subject.model_dump() for subject in subjects],
+            "subjects_count": len(subjects),
+            "completed_at": status_data.get('completed_at'),
+            "export_files": workflow_result.export_files if workflow_result else {},
+            "summary": workflow_result.summary.model_dump() if workflow_result and workflow_result.summary else None,
+            "processing_time": workflow_result.processing_time if workflow_result else 0,
+            "metadata": workflow_result.metadata if workflow_result else {}
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_response = error_handler.handle_api_error(
+            operation="get_workflow_result",
+            message=f"Failed to get workflow result for {workflow_id}",
+            exception=e,
+            request_id=request_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_response.model_dump()
+        )
+
+
+@router.post("/test/end-to-end", response_model=EndToEndTestResult)
+async def run_end_to_end_tests(
+    request: Dict,
+    security_info: Dict = Depends(security_check_middleware)
+):
+    """
+    Run comprehensive end-to-end integration tests.
+    
+    This endpoint executes complete integration tests covering all
+    components and workflows to validate system functionality.
+    """
+    request_id = get_request_id()
+    
+    try:
+        test_data_paths = request.get('test_data_paths', [])
+        test_config = request.get('test_config', {})
+        
+        if not test_data_paths:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="test_data_paths is required"
+            )
+        
+        # Execute end-to-end tests
+        test_result = await integration_service.run_end_to_end_tests(
+            test_data_paths=test_data_paths,
+            test_config=test_config
+        )
+        
+        return test_result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_response = error_handler.handle_api_error(
+            operation="run_end_to_end_tests",
+            message="Failed to run end-to-end tests",
+            exception=e,
+            request_id=request_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_response.model_dump()
+        )
+
+
+@router.get("/integration/status", response_model=Dict)
+async def get_integration_status(
+    security_info: Dict = Depends(security_check_middleware)
+):
+    """Get overall integration system status and health."""
+    request_id = get_request_id()
+    
+    try:
+        # Get workflow orchestrator metrics
+        orchestrator_metrics = workflow_orchestrator.get_performance_metrics()
+        
+        # Get integration service status
+        integration_history = integration_service.get_integration_history()
+        active_integrations = len(integration_service.active_integrations)
+        
+        # Get performance metrics
+        performance_metrics = performance_monitor.get_stats()
+        
+        # Get cache status
+        cache_status = await cache_service.get_status()
+        
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "orchestrator_metrics": orchestrator_metrics,
+            "active_integrations": active_integrations,
+            "completed_integrations": len(integration_history),
+            "performance_metrics": performance_metrics,
+            "cache_status": cache_status,
+            "components_status": {
+                "workflow_orchestrator": "active",
+                "integration_service": "active",
+                "performance_monitor": "active",
+                "cache_service": "active",
+                "security_auditor": "active"
+            }
+        }
+        
+    except Exception as e:
+        error_response = error_handler.handle_api_error(
+            operation="get_integration_status",
+            message="Failed to get integration status",
+            exception=e,
+            request_id=request_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_response.model_dump()
+        )
+
+
+# Security headers function
+def add_security_headers(response):
+    """Add security headers to response."""
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    return response

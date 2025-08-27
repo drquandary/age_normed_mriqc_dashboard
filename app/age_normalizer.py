@@ -11,12 +11,13 @@ from enum import Enum
 from .database import NormativeDatabase
 from .models import AgeGroup, MRIQCMetrics, NormalizedMetrics, QualityStatus
 from .common_utils.logging_config import setup_logging
+from .cache_service import cache_service
 
 logger = setup_logging(__name__)
 
 
 class AgeNormalizer:
-    """Handles age group assignment and percentile calculations for MRIQC metrics."""
+    """Handles age group assignment and percentile calculations for MRIQC metrics with caching."""
     
     def __init__(self, db_path: str = "data/normative_data.db"):
         self.db = NormativeDatabase(db_path)
@@ -56,7 +57,7 @@ class AgeNormalizer:
     
     def normalize_metrics(self, metrics: MRIQCMetrics, age: float) -> Optional[NormalizedMetrics]:
         """
-        Normalize MRIQC metrics using age-appropriate normative data.
+        Normalize MRIQC metrics using age-appropriate normative data with caching.
         
         Args:
             metrics: Raw MRIQC metrics
@@ -65,6 +66,12 @@ class AgeNormalizer:
         Returns:
             NormalizedMetrics with percentiles and z-scores
         """
+        # Check cache first
+        metrics_hash = cache_service.generate_hash(metrics.model_dump())
+        cached_result = cache_service.get_normalized_metrics(metrics_hash, age)
+        if cached_result:
+            return NormalizedMetrics(**cached_result)
+        
         age_group = self.get_age_group(age)
         if not age_group:
             logger.warning(f"Cannot normalize metrics - no age group for age {age}")

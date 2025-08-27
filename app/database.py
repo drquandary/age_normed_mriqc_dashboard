@@ -10,27 +10,38 @@ import json
 from contextlib import contextmanager
 
 from .common_utils.logging_config import setup_logging
+from .connection_pool import get_connection_pool
+from .cache_service import cache_service
 
 logger = setup_logging(__name__)
 
 
 class NormativeDatabase:
-    """Manages SQLite database for normative data and age groups."""
+    """Manages SQLite database for normative data and age groups with connection pooling and caching."""
     
-    def __init__(self, db_path: str = "data/normative_data.db"):
+    def __init__(self, db_path: str = "data/normative_data.db", use_connection_pool: bool = True):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.use_connection_pool = use_connection_pool
+        
+        if use_connection_pool:
+            self.connection_pool = get_connection_pool(str(self.db_path))
+        
         self._initialize_database()
     
     @contextmanager
     def get_connection(self):
-        """Context manager for database connections."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row  # Enable dict-like access
-        try:
-            yield conn
-        finally:
-            conn.close()
+        """Context manager for database connections with optional pooling."""
+        if self.use_connection_pool:
+            with self.connection_pool.get_connection() as conn:
+                yield conn
+        else:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row  # Enable dict-like access
+            try:
+                yield conn
+            finally:
+                conn.close()
     
     def _initialize_database(self):
         """Initialize database with schema and default data."""
@@ -135,6 +146,54 @@ class NormativeDatabase:
             )
         """)
         
+        # Longitudinal subjects table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS longitudinal_subjects (
+                id INTEGER PRIMARY KEY,
+                subject_id TEXT NOT NULL UNIQUE,
+                baseline_age REAL,
+                sex TEXT CHECK (sex IN ('M', 'F', 'O', 'U')),
+                study_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Timepoints table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS timepoints (
+                id INTEGER PRIMARY KEY,
+                timepoint_id TEXT NOT NULL UNIQUE,
+                longitudinal_subject_id INTEGER NOT NULL,
+                session TEXT,
+                age_at_scan REAL,
+                days_from_baseline INTEGER,
+                scan_date TIMESTAMP,
+                processed_data TEXT,  -- JSON blob of ProcessedSubject data
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (longitudinal_subject_id) REFERENCES longitudinal_subjects(id) ON DELETE CASCADE
+            )
+        """)
+        
+        # Longitudinal trends table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS longitudinal_trends (
+                id INTEGER PRIMARY KEY,
+                longitudinal_subject_id INTEGER NOT NULL,
+                metric_name TEXT NOT NULL,
+                trend_direction TEXT CHECK (trend_direction IN ('improving', 'declining', 'stable', 'variable')),
+                trend_slope REAL,
+                trend_r_squared REAL,
+                trend_p_value REAL,
+                values_over_time TEXT,  -- JSON array of values
+                age_group_changes TEXT,  -- JSON array of age group transitions
+                quality_status_changes TEXT,  -- JSON array of quality status changes
+                calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (longitudinal_subject_id) REFERENCES longitudinal_subjects(id) ON DELETE CASCADE,
+                UNIQUE(longitudinal_subject_id, metric_name)
+            )
+        """)
+        
         # Create indexes for performance
         conn.execute("CREATE INDEX IF NOT EXISTS idx_normative_metric_age ON normative_data(metric_name, age_group_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_thresholds_metric_age ON quality_thresholds(metric_name, age_group_id)")
@@ -142,6 +201,16 @@ class NormativeDatabase:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_study_configs_name ON study_configurations(study_name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_custom_age_groups_study ON custom_age_groups(study_config_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_custom_thresholds_study ON custom_quality_thresholds(study_config_id)")
+        
+        # Longitudinal data indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_longitudinal_subjects_id ON longitudinal_subjects(subject_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_longitudinal_subjects_study ON longitudinal_subjects(study_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_timepoints_subject ON timepoints(longitudinal_subject_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_timepoints_id ON timepoints(timepoint_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_timepoints_session ON timepoints(session)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_timepoints_date ON timepoints(scan_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trends_subject ON longitudinal_trends(longitudinal_subject_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trends_metric ON longitudinal_trends(metric_name)")
     
     def _populate_default_data(self, conn: sqlite3.Connection):
         """Populate database with default age groups and normative data."""
@@ -277,14 +346,23 @@ class NormativeDatabase:
             """, (metric_name, age_group_id, warn_thresh, fail_thresh, direction))
     
     def get_age_groups(self) -> List[Dict]:
-        """Get all age groups."""
+        """Get all age groups with caching."""
+        # Check cache first
+        cached_result = cache_service.get_age_groups()
+        if cached_result:
+            return cached_result
+        
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 SELECT id, name, min_age, max_age, description 
                 FROM age_groups 
                 ORDER BY min_age
             """)
-            return [dict(row) for row in cursor.fetchall()]
+            result = [dict(row) for row in cursor.fetchall()]
+            
+            # Cache the result
+            cache_service.set_age_groups(result)
+            return result
     
     def get_age_group_by_age(self, age: float) -> Optional[Dict]:
         """Get age group for a specific age."""
@@ -298,24 +376,46 @@ class NormativeDatabase:
             return dict(row) if row else None
     
     def get_normative_data(self, metric_name: str, age_group_id: int) -> Optional[Dict]:
-        """Get normative data for a specific metric and age group."""
+        """Get normative data for a specific metric and age group with caching."""
+        # Check cache first
+        cached_result = cache_service.get_normative_data(metric_name, age_group_id)
+        if cached_result:
+            return cached_result
+        
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 SELECT * FROM normative_data 
                 WHERE metric_name = ? AND age_group_id = ?
             """, (metric_name, age_group_id))
             row = cursor.fetchone()
-            return dict(row) if row else None
+            result = dict(row) if row else None
+            
+            # Cache the result if found
+            if result:
+                cache_service.set_normative_data(metric_name, age_group_id, result)
+            
+            return result
     
     def get_quality_thresholds(self, metric_name: str, age_group_id: int) -> Optional[Dict]:
-        """Get quality thresholds for a specific metric and age group."""
+        """Get quality thresholds for a specific metric and age group with caching."""
+        # Check cache first
+        cached_result = cache_service.get_quality_thresholds(metric_name, age_group_id)
+        if cached_result:
+            return cached_result
+        
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 SELECT * FROM quality_thresholds 
                 WHERE metric_name = ? AND age_group_id = ?
             """, (metric_name, age_group_id))
             row = cursor.fetchone()
-            return dict(row) if row else None
+            result = dict(row) if row else None
+            
+            # Cache the result if found
+            if result:
+                cache_service.set_quality_thresholds(metric_name, age_group_id, result)
+            
+            return result
     
     def add_custom_normative_data(self, metric_name: str, age_group_id: int, 
                                  mean_value: float, std_value: float,
@@ -564,4 +664,290 @@ class NormativeDatabase:
                 WHERE qt.metric_name = ? AND ag.name = ?
             """, (metric_name, age_group_name))
             row = cursor.fetchone()
+            return dict(row) if row else None    
+
+    # Longitudinal Data Management Methods
+    
+    def create_longitudinal_subject(self, subject_id: str, baseline_age: float = None,
+                                  sex: str = None, study_name: str = None) -> int:
+        """Create a new longitudinal subject."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT OR REPLACE INTO longitudinal_subjects 
+                (subject_id, baseline_age, sex, study_name, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (subject_id, baseline_age, sex, study_name))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_longitudinal_subject(self, subject_id: str) -> Optional[Dict]:
+        """Get longitudinal subject by ID."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM longitudinal_subjects 
+                WHERE subject_id = ?
+            """, (subject_id,))
+            row = cursor.fetchone()
             return dict(row) if row else None
+    
+    def add_timepoint(self, timepoint_id: str, subject_id: str, session: str = None,
+                     age_at_scan: float = None, days_from_baseline: int = None,
+                     scan_date: str = None, processed_data: Dict = None) -> int:
+        """Add a timepoint to a longitudinal subject."""
+        with self.get_connection() as conn:
+            # Get or create longitudinal subject
+            cursor = conn.execute("""
+                SELECT id FROM longitudinal_subjects WHERE subject_id = ?
+            """, (subject_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                # Create longitudinal subject if it doesn't exist
+                longitudinal_subject_id = self.create_longitudinal_subject(subject_id)
+            else:
+                longitudinal_subject_id = row['id']
+            
+            # Add timepoint
+            processed_json = json.dumps(processed_data) if processed_data else None
+            cursor = conn.execute("""
+                INSERT OR REPLACE INTO timepoints 
+                (timepoint_id, longitudinal_subject_id, session, age_at_scan, 
+                 days_from_baseline, scan_date, processed_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (timepoint_id, longitudinal_subject_id, session, age_at_scan,
+                  days_from_baseline, scan_date, processed_json))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_subject_timepoints(self, subject_id: str) -> List[Dict]:
+        """Get all timepoints for a subject."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT t.* FROM timepoints t
+                JOIN longitudinal_subjects ls ON t.longitudinal_subject_id = ls.id
+                WHERE ls.subject_id = ?
+                ORDER BY t.days_from_baseline, t.scan_date
+            """, (subject_id,))
+            timepoints = []
+            for row in cursor.fetchall():
+                tp = dict(row)
+                if tp['processed_data']:
+                    tp['processed_data'] = json.loads(tp['processed_data'])
+                timepoints.append(tp)
+            return timepoints
+    
+    def get_longitudinal_subjects_by_study(self, study_name: str) -> List[Dict]:
+        """Get all longitudinal subjects for a study."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM longitudinal_subjects 
+                WHERE study_name = ?
+                ORDER BY subject_id
+            """, (study_name,))
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_all_longitudinal_subjects(self) -> List[Dict]:
+        """Get all longitudinal subjects."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT ls.*, COUNT(t.id) as timepoint_count
+                FROM longitudinal_subjects ls
+                LEFT JOIN timepoints t ON ls.id = t.longitudinal_subject_id
+                GROUP BY ls.id
+                ORDER BY ls.subject_id
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def calculate_and_store_trend(self, subject_id: str, metric_name: str,
+                                trend_direction: str, trend_slope: float = None,
+                                trend_r_squared: float = None, trend_p_value: float = None,
+                                values_over_time: List[Dict] = None,
+                                age_group_changes: List[str] = None,
+                                quality_status_changes: List[Dict] = None) -> int:
+        """Calculate and store longitudinal trend for a subject and metric."""
+        with self.get_connection() as conn:
+            # Get longitudinal subject ID
+            cursor = conn.execute("""
+                SELECT id FROM longitudinal_subjects WHERE subject_id = ?
+            """, (subject_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Longitudinal subject {subject_id} not found")
+            
+            longitudinal_subject_id = row['id']
+            
+            # Store trend data
+            values_json = json.dumps(values_over_time or [])
+            age_changes_json = json.dumps(age_group_changes or [])
+            status_changes_json = json.dumps(quality_status_changes or [])
+            
+            cursor = conn.execute("""
+                INSERT OR REPLACE INTO longitudinal_trends 
+                (longitudinal_subject_id, metric_name, trend_direction, trend_slope,
+                 trend_r_squared, trend_p_value, values_over_time, age_group_changes,
+                 quality_status_changes, calculated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (longitudinal_subject_id, metric_name, trend_direction, trend_slope,
+                  trend_r_squared, trend_p_value, values_json, age_changes_json,
+                  status_changes_json))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_subject_trends(self, subject_id: str) -> List[Dict]:
+        """Get all trends for a subject."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT lt.* FROM longitudinal_trends lt
+                JOIN longitudinal_subjects ls ON lt.longitudinal_subject_id = ls.id
+                WHERE ls.subject_id = ?
+                ORDER BY lt.metric_name
+            """, (subject_id,))
+            trends = []
+            for row in cursor.fetchall():
+                trend = dict(row)
+                trend['values_over_time'] = json.loads(trend['values_over_time'] or '[]')
+                trend['age_group_changes'] = json.loads(trend['age_group_changes'] or '[]')
+                trend['quality_status_changes'] = json.loads(trend['quality_status_changes'] or '[]')
+                trends.append(trend)
+            return trends
+    
+    def get_study_longitudinal_summary(self, study_name: str) -> Dict:
+        """Get longitudinal summary statistics for a study."""
+        with self.get_connection() as conn:
+            # Basic counts
+            cursor = conn.execute("""
+                SELECT 
+                    COUNT(DISTINCT ls.id) as total_subjects,
+                    COUNT(t.id) as total_timepoints,
+                    AVG(timepoint_counts.tp_count) as avg_timepoints_per_subject,
+                    MIN(timepoint_counts.tp_count) as min_timepoints_per_subject,
+                    MAX(timepoint_counts.tp_count) as max_timepoints_per_subject
+                FROM longitudinal_subjects ls
+                LEFT JOIN timepoints t ON ls.id = t.longitudinal_subject_id
+                LEFT JOIN (
+                    SELECT longitudinal_subject_id, COUNT(*) as tp_count
+                    FROM timepoints
+                    GROUP BY longitudinal_subject_id
+                ) timepoint_counts ON ls.id = timepoint_counts.longitudinal_subject_id
+                WHERE ls.study_name = ?
+            """, (study_name,))
+            basic_stats = dict(cursor.fetchone())
+            
+            # Follow-up duration statistics
+            cursor = conn.execute("""
+                SELECT 
+                    AVG(max_days) as avg_followup_days,
+                    MIN(max_days) as min_followup_days,
+                    MAX(max_days) as max_followup_days
+                FROM (
+                    SELECT 
+                        ls.id,
+                        MAX(t.days_from_baseline) as max_days
+                    FROM longitudinal_subjects ls
+                    JOIN timepoints t ON ls.id = t.longitudinal_subject_id
+                    WHERE ls.study_name = ? AND t.days_from_baseline IS NOT NULL
+                    GROUP BY ls.id
+                ) followup_stats
+            """, (study_name,))
+            followup_stats = dict(cursor.fetchone())
+            
+            # Age progression statistics
+            cursor = conn.execute("""
+                SELECT 
+                    AVG(ls.baseline_age) as avg_baseline_age,
+                    AVG(max_ages.max_age) as avg_final_age,
+                    AVG(max_ages.max_age - ls.baseline_age) as avg_age_change
+                FROM longitudinal_subjects ls
+                LEFT JOIN (
+                    SELECT 
+                        longitudinal_subject_id,
+                        MAX(age_at_scan) as max_age
+                    FROM timepoints
+                    WHERE age_at_scan IS NOT NULL
+                    GROUP BY longitudinal_subject_id
+                ) max_ages ON ls.id = max_ages.longitudinal_subject_id
+                WHERE ls.study_name = ? AND ls.baseline_age IS NOT NULL
+            """, (study_name,))
+            age_stats = dict(cursor.fetchone())
+            
+            # Trend statistics
+            cursor = conn.execute("""
+                SELECT 
+                    metric_name,
+                    trend_direction,
+                    COUNT(*) as count
+                FROM longitudinal_trends lt
+                JOIN longitudinal_subjects ls ON lt.longitudinal_subject_id = ls.id
+                WHERE ls.study_name = ?
+                GROUP BY metric_name, trend_direction
+                ORDER BY metric_name, trend_direction
+            """, (study_name,))
+            trend_stats = {}
+            for row in cursor.fetchall():
+                metric = row['metric_name']
+                direction = row['trend_direction']
+                count = row['count']
+                
+                if metric not in trend_stats:
+                    trend_stats[metric] = {}
+                trend_stats[metric][direction] = count
+            
+            return {
+                'study_name': study_name,
+                'basic_statistics': basic_stats,
+                'followup_statistics': followup_stats,
+                'age_statistics': age_stats,
+                'trend_statistics': trend_stats,
+                'generated_at': datetime.now().isoformat()
+            }
+    
+    def delete_longitudinal_subject(self, subject_id: str) -> bool:
+        """Delete a longitudinal subject and all associated data."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                DELETE FROM longitudinal_subjects WHERE subject_id = ?
+            """, (subject_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def delete_timepoint(self, timepoint_id: str) -> bool:
+        """Delete a specific timepoint."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                DELETE FROM timepoints WHERE timepoint_id = ?
+            """, (timepoint_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def update_longitudinal_subject(self, subject_id: str, baseline_age: float = None,
+                                  sex: str = None, study_name: str = None) -> bool:
+        """Update longitudinal subject information."""
+        with self.get_connection() as conn:
+            updates = []
+            params = []
+            
+            if baseline_age is not None:
+                updates.append("baseline_age = ?")
+                params.append(baseline_age)
+            
+            if sex is not None:
+                updates.append("sex = ?")
+                params.append(sex)
+            
+            if study_name is not None:
+                updates.append("study_name = ?")
+                params.append(study_name)
+            
+            if updates:
+                updates.append("updated_at = CURRENT_TIMESTAMP")
+                params.append(subject_id)
+                
+                cursor = conn.execute(f"""
+                    UPDATE longitudinal_subjects 
+                    SET {', '.join(updates)}
+                    WHERE subject_id = ?
+                """, params)
+                conn.commit()
+                return cursor.rowcount > 0
+            
+            return False

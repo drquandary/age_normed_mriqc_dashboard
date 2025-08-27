@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+
+{% block title %}Longitudinal Data Analysis - Age-Normed MRIQC Dashboard{% endblock %}
+
+{% block extra_css %}
+<style>
+    .metric-card {
+        transition: transform 0.2s;
+    }
+    .metric-card:hover {
+        transform: translateY(-2px);
+    }
+    .trend-badge {
+        font-size: 0.8em;
+    }
+    .chart-container {
+        position: relative;
+        height: 300px;
+        margin-bottom: 2rem;
+    }
+    .loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+        display: none;
+        justify-content: center;
+        align-items: center;
+        z-index: 9999;
+    }
+    .loading-spinner {
+        background: white;
+        padding: 2rem;
+        border-radius: 8px;
+        text-align: center;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay">
+        <div class="loading-spinner">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p id="loading-indicator" class="mt-2 mb-0">Loading...</p>
+        </div>
+    </div>
+
+    <!-- Alert Container -->
+    <div id="alert-container" class="position-fixed top-0 end-0 p-3" style="z-index: 1050;"></div>
+
+    <!-- Header -->
+    <div class="row mb-4">
+        <div class="col">
+            <h1 class="h3">Longitudinal Data Analysis</h1>
+            <p class="text-muted">Track quality metrics over time and analyze longitudinal trends</p>
+        </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h6 class="card-title">Study Filter</h6>
+                    <div class="mb-3">
+                        <label for="study-name-filter" class="form-label">Study Name</label>
+                        <select id="study-name-filter" class="form-select">
+                            <option value="">All Studies</option>
+                            <!-- Options will be populated dynamically -->
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" onclick="longitudinalManager.loadLongitudinalSubjects(document.getElementById('study-name-filter').value)">
+                        Load Subjects
+                    </button>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h6 class="card-title">Export Data</h6>
+                    <p class="card-text small text-muted">Export longitudinal data for external analysis</p>
+                    <div class="btn-group" role="group">
+                        <button id="export-longitudinal-csv" class="btn btn-outline-primary">
+                            <i class="fas fa-file-csv"></i> Export CSV
+                        </button>
+                        <button id="export-longitudinal-json" class="btn btn-outline-primary">
+                            <i class="fas fa-file-code"></i> Export JSON
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="row">
+        <!-- Subjects List -->
+        <div class="col-md-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">Longitudinal Subjects</h5>
+                </div>
+                <div class="card-body" style="max-height: 600px; overflow-y: auto;">
+                    <div id="longitudinal-subjects-list">
+                        <p class="text-muted">Click "Load Subjects" to view available longitudinal data</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Subject Details and Analysis -->
+        <div class="col-md-8">
+            <!-- Subject Details -->
+            <div id="subject-details" class="mb-4">
+                <div class="card">
+                    <div class="card-body text-center text-muted">
+                        <i class="fas fa-user-clock fa-3x mb-3"></i>
+                        <h5>Select a Subject</h5>
+                        <p>Choose a subject from the list to view longitudinal analysis</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trends Analysis -->
+            <div id="trends-analysis" class="mb-4">
+                <!-- Content will be populated dynamically -->
+            </div>
+
+            <!-- Time Series Charts -->
+            <div id="timeseries-charts">
+                <!-- Content will be populated dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Study Summary Modal -->
+    <div class="modal fade" id="studySummaryModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Longitudinal Study Summary</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="study-summary-content">
+                        <!-- Content will be populated dynamically -->
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="{{ url_for('static', filename='js/longitudinal.js') }}"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Load available studies for filter
+    loadStudyOptions();
+    
+    // Auto-load subjects if study is specified in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const studyName = urlParams.get('study');
+    if (studyName) {
+        document.getElementById('study-name-filter').value = studyName;
+        longitudinalManager.loadLongitudinalSubjects(studyName);
+    }
+});
+
+async function loadStudyOptions() {
+    try {
+        // This would typically load from a studies endpoint
+        // For now, we'll populate with common study names
+        const studySelect = document.getElementById('study-name-filter');
+        const commonStudies = [
+            'Longitudinal Aging Study',
+            'Pediatric Development Study',
+            'Adult Cognitive Study',
+            'Multi-site Validation Study'
+        ];
+        
+        commonStudies.forEach(study => {
+            const option = document.createElement('option');
+            option.value = study;
+            option.textContent = study;
+            studySelect.appendChild(option);
+        });
+        
+    } catch (error) {
+        console.error('Error loading study options:', error);
+    }
+}
+
+// Add keyboard shortcuts
+document.addEventListener('keydown', function(e) {
+    if (e.ctrlKey || e.metaKey) {
+        switch(e.key) {
+            case 'e':
+                e.preventDefault();
+                document.getElementById('export-longitudinal-csv').click();
+                break;
+            case 'r':
+                e.preventDefault();
+                const studyFilter = document.getElementById('study-name-filter').value;
+                longitudinalManager.loadLongitudinalSubjects(studyFilter);
+                break;
+        }
+    }
+});
+
+// Override loading functions to use overlay
+function showLoading(message = 'Loading...') {
+    document.getElementById('loading-indicator').textContent = message;
+    document.getElementById('loading-overlay').style.display = 'flex';
+}
+
+function hideLoading() {
+    document.getElementById('loading-overlay').style.display = 'none';
+}
+</script>
+{% endblock %}
