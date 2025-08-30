@@ -284,8 +284,8 @@ class TestSecureFileHandler:
                 
                 assert "Malware detected" in str(exc_info.value.detail)
 
-class 
-TestDataRetentionManager:
+
+class TestDataRetentionManager:
     """Test data retention and cleanup functionality."""
     
     def setup_method(self):

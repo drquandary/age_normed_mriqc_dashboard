@@ -3013,8 +3013,8 @@ async def bulk_update_subjects_quality(
             request_id=request_id
         )
         raise HTTPException(status_code=500, detail=error_response.message)
-# Lon
-gitudinal data endpoints
+
+# Longitudinal data endpoints
 from .longitudinal_service import LongitudinalService
 from .models import LongitudinalSubject, LongitudinalTrend, LongitudinalSummary
 
@@ -3361,8 +3361,8 @@ async def delete_timepoint(timepoint_id: str):
     except Exception as e:
         logger.error(f"Failed to delete timepoint {timepoint_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to delete timepoint: {str(e)}")
-# Perfo
-rmance Monitoring Endpoints
+
+# Performance Monitoring Endpoints
 
 @router.get("/api/performance/stats")
 @monitor_performance("get_performance_stats")
